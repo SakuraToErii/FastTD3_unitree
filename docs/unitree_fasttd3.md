@@ -54,7 +54,7 @@ By default, the Unitree launcher passes these FastTD3 options:
 
 So the final checkpoint is saved as `model_<global_step>.pt` rather than the old FastTD3 `models/<run>_final.pt` layout.
 
-Evaluation runs in a separate Isaac Sim process through `fast_td3/eval_unitree.py`. The trainer writes a temporary checkpoint under `<run>/eval/`, including the current Unitree curriculum state, and the eval process uses `seed + eval_seed_offset` (`1000003` by default). This keeps eval reset/step/curriculum updates from touching the training environment while evaluating at the same current curriculum difficulty.
+Evaluation runs in a separate Isaac Sim process through `fast_td3/eval_unitree.py`. The trainer writes a temporary checkpoint under `<run>/eval/`, including the current Unitree curriculum state, and the eval process uses `seed + eval_seed_offset` (`1000003` by default). This keeps eval reset/step/curriculum updates from touching the training environment while evaluating at the same current curriculum difficulty. The implementation record is in `docs/eval_isolation.md` and corresponds to commit `77c7efd`.
 
 ## Playing And Exporting
 
@@ -143,6 +143,7 @@ scripts/train_unitree_fasttd3.py
 scripts/play_unitree_fasttd3.py
 scripts/train.sh
 fast_td3/train.py
+fast_td3/eval_unitree.py
 fast_td3/hyperparams.py
 fast_td3/fast_td3.py
 fast_td3/fast_td3_utils.py
