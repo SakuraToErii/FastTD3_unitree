@@ -3,9 +3,11 @@ import os
 os.environ["TORCHDYNAMO_INLINE_INBUILT_NN_MODULES"] = "1"
 os.environ["OMP_NUM_THREADS"] = "1"
 
+import statistics
 import random
 import time
 import math
+from collections import deque
 
 import tqdm
 import wandb
@@ -77,6 +79,11 @@ def main():
     amp_dtype = torch.bfloat16 if args.amp_dtype == "bf16" else torch.float16
 
     scaler = GradScaler(enabled=amp_enabled and amp_dtype == torch.float16)
+    writer = None
+    if args.log_tensorboard:
+        from torch.utils.tensorboard import SummaryWriter
+
+        writer = SummaryWriter(log_dir=args.save_dir, flush_secs=10)
 
     if args.use_wandb:
         wandb.init(
@@ -314,6 +321,67 @@ def main():
 
         return episode_returns.mean().item(), episode_lengths.mean().item()
 
+    def scalar_value(value):
+        if isinstance(value, torch.Tensor):
+            return value.detach().mean().item()
+        return float(value)
+
+    def collect_episode_info_scalars(ep_infos):
+        if not ep_infos:
+            return {}
+
+        scalars = {}
+        for key in ep_infos[0]:
+            values = []
+            for ep_info in ep_infos:
+                if key not in ep_info:
+                    continue
+                value = ep_info[key]
+                if not isinstance(value, torch.Tensor):
+                    value = torch.tensor([value], device=device)
+                value = value.detach().to(device)
+                if len(value.shape) == 0:
+                    value = value.unsqueeze(0)
+                values.append(value.flatten())
+            if not values:
+                continue
+            tag = key if "/" in key else f"Episode/{key}"
+            scalars[tag] = torch.cat(values).mean().item()
+        return scalars
+
+    def collect_train_scalars(logs, ep_infos, rewbuffer, lenbuffer, speed, step):
+        scalars = {
+            "Perf/total_fps": speed * envs.num_envs,
+            "Perf/control_steps_per_second": speed,
+            "Loss/actor_loss": scalar_value(logs["actor_loss"]),
+            "Loss/qf_loss": scalar_value(logs["qf_loss"]),
+            "Loss/actor_learning_rate": actor_scheduler.get_last_lr()[0],
+            "Loss/critic_learning_rate": q_scheduler.get_last_lr()[0],
+            "Value/qf_max": scalar_value(logs["qf_max"]),
+            "Value/qf_min": scalar_value(logs["qf_min"]),
+            "Grad/actor_norm": scalar_value(logs["actor_grad_norm"]),
+            "Grad/critic_norm": scalar_value(logs["critic_grad_norm"]),
+            "Train/env_reward": scalar_value(logs["env_rewards"]),
+            "Train/buffer_reward": scalar_value(logs["buffer_rewards"]),
+            "Train/total_timesteps": step * envs.num_envs,
+        }
+
+        if len(rewbuffer) > 0:
+            scalars["Train/mean_reward"] = statistics.mean(rewbuffer)
+            scalars["Train/mean_episode_length"] = statistics.mean(lenbuffer)
+        if "eval_avg_return" in logs:
+            scalars["Eval/avg_return"] = scalar_value(logs["eval_avg_return"])
+            scalars["Eval/avg_length"] = scalar_value(logs["eval_avg_length"])
+        scalars.update(collect_episode_info_scalars(ep_infos))
+        return scalars
+
+    def write_scalar_logs(scalars, step):
+        if writer is not None:
+            for tag, value in scalars.items():
+                writer.add_scalar(tag, value, step)
+        if args.use_wandb:
+            wandb.log(scalars, step=step)
+
     def update_main(data, logs_dict):
         with autocast(
             device_type=amp_device_type, dtype=amp_dtype, enabled=amp_enabled
@@ -485,158 +553,178 @@ def main():
 
     dones = None
     pbar = tqdm.tqdm(total=args.total_timesteps, initial=global_step)
+    ep_infos = []
+    rewbuffer = deque(maxlen=100)
+    lenbuffer = deque(maxlen=100)
+    cur_reward_sum = torch.zeros(envs.num_envs, dtype=torch.float, device=device)
+    cur_episode_length = torch.zeros(envs.num_envs, dtype=torch.float, device=device)
     start_time = None
     desc = ""
 
-    while global_step < args.total_timesteps:
-        mark_step()
-        logs_dict = TensorDict()
-        if (
-            start_time is None
-            and global_step >= args.measure_burnin + args.learning_starts
-        ):
-            start_time = time.time()
-            measure_burnin = global_step
-
-        with torch.no_grad(), autocast(
-            device_type=amp_device_type, dtype=amp_dtype, enabled=amp_enabled
-        ):
-            norm_obs = normalize_obs(obs)
-            actions = policy(obs=norm_obs, dones=dones)
-
-        next_obs, rewards, dones, infos = envs.step(actions.float())
-        truncations = infos["time_outs"]
-
-        if args.reward_normalization:
-            update_stats(rewards, dones.float())
-
-        if envs.asymmetric_obs:
-            next_critic_obs = infos["observations"]["critic"]
-        # Compute 'true' next_obs and next_critic_obs for saving
-        true_next_obs = torch.where(
-            dones[:, None] > 0, infos["observations"]["raw"]["obs"], next_obs
-        )
-        if envs.asymmetric_obs:
-            true_next_critic_obs = torch.where(
-                dones[:, None] > 0,
-                infos["observations"]["raw"]["critic_obs"],
-                next_critic_obs,
-            )
-
-        transition = TensorDict(
-            {
-                "observations": obs,
-                "actions": torch.as_tensor(actions, device=device, dtype=torch.float),
-                "next": {
-                    "observations": true_next_obs,
-                    "rewards": torch.as_tensor(
-                        rewards, device=device, dtype=torch.float
-                    ),
-                    "truncations": truncations.long(),
-                    "dones": dones.long(),
-                },
-            },
-            batch_size=(envs.num_envs,),
-            device=device,
-        )
-        if envs.asymmetric_obs:
-            transition["critic_observations"] = critic_obs
-            transition["next"]["critic_observations"] = true_next_critic_obs
-        rb.extend(transition)
-
-        obs = next_obs
-        if envs.asymmetric_obs:
-            critic_obs = next_critic_obs
-
-        if global_step > args.learning_starts:
-            for i in range(args.num_updates):
-                data = rb.sample(max(1, args.batch_size // args.num_envs))
-                data["observations"] = normalize_obs(data["observations"])
-                data["next"]["observations"] = normalize_obs(
-                    data["next"]["observations"]
-                )
-                if envs.asymmetric_obs:
-                    data["critic_observations"] = normalize_critic_obs(
-                        data["critic_observations"]
-                    )
-                    data["next"]["critic_observations"] = normalize_critic_obs(
-                        data["next"]["critic_observations"]
-                    )
-                raw_rewards = data["next"]["rewards"]
-                data["next"]["rewards"] = normalize_reward(raw_rewards)
-
-                logs_dict = update_main(data, logs_dict)
-                if args.num_updates > 1:
-                    if i % args.policy_frequency == 1:
-                        logs_dict = update_pol(data, logs_dict)
-                else:
-                    if global_step % args.policy_frequency == 0:
-                        logs_dict = update_pol(data, logs_dict)
-
-                soft_update(qnet, qnet_target, args.tau)
-
-            if global_step % 100 == 0 and start_time is not None:
-                speed = (global_step - measure_burnin) / (time.time() - start_time)
-                pbar.set_description(f"{speed: 4.4f} sps, " + desc)
-                with torch.no_grad():
-                    logs = {
-                        "actor_loss": logs_dict["actor_loss"].mean(),
-                        "qf_loss": logs_dict["qf_loss"].mean(),
-                        "qf_max": logs_dict["qf_max"].mean(),
-                        "qf_min": logs_dict["qf_min"].mean(),
-                        "actor_grad_norm": logs_dict["actor_grad_norm"].mean(),
-                        "critic_grad_norm": logs_dict["critic_grad_norm"].mean(),
-                        "env_rewards": rewards.mean(),
-                        "buffer_rewards": raw_rewards.mean(),
-                    }
-
-                    if args.eval_interval > 0 and global_step % args.eval_interval == 0:
-                        print(f"Evaluating at global step {global_step}")
-                        eval_avg_return, eval_avg_length = evaluate()
-                        # Evaluation reuses the training env, so restart training
-                        # rollouts with fresh policy and critic observations.
-                        if envs.asymmetric_obs:
-                            obs, critic_obs = envs.reset_with_critic_obs()
-                            critic_obs = torch.as_tensor(
-                                critic_obs, device=device, dtype=torch.float
-                            )
-                        else:
-                            obs = envs.reset()
-                        logs["eval_avg_return"] = eval_avg_return
-                        logs["eval_avg_length"] = eval_avg_length
-                if args.use_wandb:
-                    wandb.log(
-                        {
-                            "speed": speed,
-                            "frame": global_step * args.num_envs,
-                            "critic_lr": q_scheduler.get_last_lr()[0],
-                            "actor_lr": actor_scheduler.get_last_lr()[0],
-                            **logs,
-                        },
-                        step=global_step,
-                    )
-
+    try:
+        while global_step < args.total_timesteps:
+            mark_step()
+            logs_dict = TensorDict()
             if (
-                args.save_interval > 0
-                and global_step > 0
-                and global_step % args.save_interval == 0
+                start_time is None
+                and global_step >= args.measure_burnin + args.learning_starts
             ):
-                print(f"Saving model at global step {global_step}")
-                save_params(
-                    global_step,
-                    actor,
-                    qnet,
-                    qnet_target,
-                    obs_normalizer,
-                    critic_obs_normalizer,
-                    args,
-                    checkpoint_path(global_step),
+                start_time = time.time()
+                measure_burnin = global_step
+
+            with torch.no_grad(), autocast(
+                device_type=amp_device_type, dtype=amp_dtype, enabled=amp_enabled
+            ):
+                norm_obs = normalize_obs(obs)
+                actions = policy(obs=norm_obs, dones=dones)
+
+            next_obs, rewards, dones, infos = envs.step(actions.float())
+            truncations = infos["time_outs"]
+
+            if "episode" in infos:
+                ep_infos.append(infos["episode"])
+            elif "log" in infos:
+                ep_infos.append(infos["log"])
+            cur_reward_sum += rewards
+            cur_episode_length += 1
+            done_ids = (dones > 0).nonzero(as_tuple=False).flatten()
+            if len(done_ids) > 0:
+                rewbuffer.extend(cur_reward_sum[done_ids].detach().cpu().numpy().tolist())
+                lenbuffer.extend(cur_episode_length[done_ids].detach().cpu().numpy().tolist())
+                cur_reward_sum[done_ids] = 0
+                cur_episode_length[done_ids] = 0
+
+            if args.reward_normalization:
+                update_stats(rewards, dones.float())
+
+            if envs.asymmetric_obs:
+                next_critic_obs = infos["observations"]["critic"]
+            # Compute 'true' next_obs and next_critic_obs for saving
+            true_next_obs = torch.where(
+                dones[:, None] > 0, infos["observations"]["raw"]["obs"], next_obs
+            )
+            if envs.asymmetric_obs:
+                true_next_critic_obs = torch.where(
+                    dones[:, None] > 0,
+                    infos["observations"]["raw"]["critic_obs"],
+                    next_critic_obs,
                 )
 
-        global_step += 1
-        actor_scheduler.step()
-        q_scheduler.step()
-        pbar.update(1)
+            transition = TensorDict(
+                {
+                    "observations": obs,
+                    "actions": torch.as_tensor(actions, device=device, dtype=torch.float),
+                    "next": {
+                        "observations": true_next_obs,
+                        "rewards": torch.as_tensor(
+                            rewards, device=device, dtype=torch.float
+                        ),
+                        "truncations": truncations.long(),
+                        "dones": dones.long(),
+                    },
+                },
+                batch_size=(envs.num_envs,),
+                device=device,
+            )
+            if envs.asymmetric_obs:
+                transition["critic_observations"] = critic_obs
+                transition["next"]["critic_observations"] = true_next_critic_obs
+            rb.extend(transition)
+
+            obs = next_obs
+            if envs.asymmetric_obs:
+                critic_obs = next_critic_obs
+
+            if global_step > args.learning_starts:
+                for i in range(args.num_updates):
+                    data = rb.sample(max(1, args.batch_size // args.num_envs))
+                    data["observations"] = normalize_obs(data["observations"])
+                    data["next"]["observations"] = normalize_obs(
+                        data["next"]["observations"]
+                    )
+                    if envs.asymmetric_obs:
+                        data["critic_observations"] = normalize_critic_obs(
+                            data["critic_observations"]
+                        )
+                        data["next"]["critic_observations"] = normalize_critic_obs(
+                            data["next"]["critic_observations"]
+                        )
+                    raw_rewards = data["next"]["rewards"]
+                    data["next"]["rewards"] = normalize_reward(raw_rewards)
+
+                    logs_dict = update_main(data, logs_dict)
+                    if args.num_updates > 1:
+                        if i % args.policy_frequency == 1:
+                            logs_dict = update_pol(data, logs_dict)
+                    else:
+                        if global_step % args.policy_frequency == 0:
+                            logs_dict = update_pol(data, logs_dict)
+
+                    soft_update(qnet, qnet_target, args.tau)
+
+                if args.log_interval > 0 and global_step % args.log_interval == 0 and start_time is not None:
+                    speed = (global_step - measure_burnin) / (time.time() - start_time)
+                    pbar.set_description(f"{speed: 4.4f} sps, " + desc)
+                    with torch.no_grad():
+                        logs = {
+                            "actor_loss": logs_dict["actor_loss"].mean(),
+                            "qf_loss": logs_dict["qf_loss"].mean(),
+                            "qf_max": logs_dict["qf_max"].mean(),
+                            "qf_min": logs_dict["qf_min"].mean(),
+                            "actor_grad_norm": logs_dict["actor_grad_norm"].mean(),
+                            "critic_grad_norm": logs_dict["critic_grad_norm"].mean(),
+                            "env_rewards": rewards.mean(),
+                            "buffer_rewards": raw_rewards.mean(),
+                        }
+
+                        if args.eval_interval > 0 and global_step % args.eval_interval == 0:
+                            print(f"Evaluating at global step {global_step}")
+                            eval_avg_return, eval_avg_length = evaluate()
+                            # Evaluation reuses the training env, so restart training
+                            # rollouts with fresh policy and critic observations.
+                            if envs.asymmetric_obs:
+                                obs, critic_obs = envs.reset_with_critic_obs()
+                                critic_obs = torch.as_tensor(
+                                    critic_obs, device=device, dtype=torch.float
+                                )
+                            else:
+                                obs = envs.reset()
+                            cur_reward_sum.zero_()
+                            cur_episode_length.zero_()
+                            logs["eval_avg_return"] = eval_avg_return
+                            logs["eval_avg_length"] = eval_avg_length
+
+                    scalar_logs = collect_train_scalars(
+                        logs, ep_infos, rewbuffer, lenbuffer, speed, global_step
+                    )
+                    write_scalar_logs(scalar_logs, global_step)
+                    ep_infos.clear()
+
+                if (
+                    args.save_interval > 0
+                    and global_step > 0
+                    and global_step % args.save_interval == 0
+                ):
+                    print(f"Saving model at global step {global_step}")
+                    save_params(
+                        global_step,
+                        actor,
+                        qnet,
+                        qnet_target,
+                        obs_normalizer,
+                        critic_obs_normalizer,
+                        args,
+                        checkpoint_path(global_step),
+                    )
+
+            global_step += 1
+            actor_scheduler.step()
+            q_scheduler.step()
+            pbar.update(1)
+    finally:
+        if writer is not None:
+            writer.flush()
+            writer.close()
 
     save_params(
         global_step,

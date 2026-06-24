@@ -3,9 +3,11 @@ import os
 os.environ["TORCHDYNAMO_INLINE_INBUILT_NN_MODULES"] = "1"
 os.environ["OMP_NUM_THREADS"] = "1"
 
+import statistics
 import random
 import time
 import math
+from collections import deque
 
 import tqdm
 import wandb
@@ -99,6 +101,11 @@ def main(rank: int, world_size: int):
     amp_dtype = torch.bfloat16 if args.amp_dtype == "bf16" else torch.float16
 
     scaler = GradScaler(enabled=amp_enabled and amp_dtype == torch.float16)
+    writer = None
+    if args.log_tensorboard and rank == 0:
+        from torch.utils.tensorboard import SummaryWriter
+
+        writer = SummaryWriter(log_dir=args.save_dir, flush_secs=10)
 
     if args.use_wandb and rank == 0:
         wandb.init(
@@ -340,6 +347,70 @@ def main(rank: int, world_size: int):
 
         return episode_returns.mean(), episode_lengths.mean()
 
+    def scalar_value(value):
+        if isinstance(value, torch.Tensor):
+            return value.detach().mean().item()
+        return float(value)
+
+    def collect_episode_info_scalars(ep_infos):
+        if not ep_infos:
+            return {}
+
+        scalars = {}
+        for key in ep_infos[0]:
+            values = []
+            for ep_info in ep_infos:
+                if key not in ep_info:
+                    continue
+                value = ep_info[key]
+                if not isinstance(value, torch.Tensor):
+                    value = torch.tensor([value], device=device)
+                value = value.detach().to(device)
+                if len(value.shape) == 0:
+                    value = value.unsqueeze(0)
+                values.append(value.flatten())
+            if not values:
+                continue
+            tag = key if "/" in key else f"Episode/{key}"
+            scalars[tag] = torch.cat(values).mean().item()
+        return scalars
+
+    def collect_train_scalars(logs, ep_infos, rewbuffer, lenbuffer, speed, step):
+        scalars = {
+            "Perf/total_fps": speed * envs.num_envs * world_size,
+            "Perf/control_steps_per_second": speed,
+            "Perf/world_size": world_size,
+            "Loss/actor_loss": scalar_value(logs["actor_loss"]),
+            "Loss/qf_loss": scalar_value(logs["qf_loss"]),
+            "Loss/actor_learning_rate": actor_scheduler.get_last_lr()[0],
+            "Loss/critic_learning_rate": q_scheduler.get_last_lr()[0],
+            "Value/qf_max": scalar_value(logs["qf_max"]),
+            "Value/qf_min": scalar_value(logs["qf_min"]),
+            "Grad/actor_norm": scalar_value(logs["actor_grad_norm"]),
+            "Grad/critic_norm": scalar_value(logs["critic_grad_norm"]),
+            "Train/env_reward": scalar_value(logs["env_rewards"]),
+            "Train/buffer_reward": scalar_value(logs["buffer_rewards"]),
+            "Train/total_timesteps": step * envs.num_envs * world_size,
+        }
+
+        if len(rewbuffer) > 0:
+            scalars["Train/mean_reward"] = statistics.mean(rewbuffer)
+            scalars["Train/mean_episode_length"] = statistics.mean(lenbuffer)
+        if "eval_avg_return" in logs:
+            scalars["Eval/avg_return"] = scalar_value(logs["eval_avg_return"])
+            scalars["Eval/avg_length"] = scalar_value(logs["eval_avg_length"])
+        scalars.update(collect_episode_info_scalars(ep_infos))
+        return scalars
+
+    def write_scalar_logs(scalars, step):
+        if rank != 0:
+            return
+        if writer is not None:
+            for tag, value in scalars.items():
+                writer.add_scalar(tag, value, step)
+        if args.use_wandb:
+            wandb.log(scalars, step=step)
+
     def update_main(data, logs_dict):
         with autocast(
             device_type=amp_device_type, dtype=amp_dtype, enabled=amp_enabled
@@ -525,6 +596,11 @@ def main(rank: int, world_size: int):
 
     dones = None
     pbar = tqdm.tqdm(total=args.total_timesteps, initial=global_step)
+    ep_infos = []
+    rewbuffer = deque(maxlen=100)
+    lenbuffer = deque(maxlen=100)
+    cur_reward_sum = torch.zeros(envs.num_envs, dtype=torch.float, device=device)
+    cur_episode_length = torch.zeros(envs.num_envs, dtype=torch.float, device=device)
     start_time = None
     desc = ""
 
@@ -546,6 +622,19 @@ def main(rank: int, world_size: int):
 
         next_obs, rewards, dones, infos = envs.step(actions.float())
         truncations = infos["time_outs"]
+
+        if "episode" in infos:
+            ep_infos.append(infos["episode"])
+        elif "log" in infos:
+            ep_infos.append(infos["log"])
+        cur_reward_sum += rewards
+        cur_episode_length += 1
+        done_ids = (dones > 0).nonzero(as_tuple=False).flatten()
+        if len(done_ids) > 0:
+            rewbuffer.extend(cur_reward_sum[done_ids].detach().cpu().numpy().tolist())
+            lenbuffer.extend(cur_episode_length[done_ids].detach().cpu().numpy().tolist())
+            cur_reward_sum[done_ids] = 0
+            cur_episode_length[done_ids] = 0
 
         if args.reward_normalization:
             update_stats(rewards, dones.float())
@@ -615,7 +704,7 @@ def main(rank: int, world_size: int):
 
                 soft_update(qnet, qnet_target, args.tau)
 
-            if global_step % 100 == 0 and start_time is not None:
+            if args.log_interval > 0 and global_step % args.log_interval == 0 and start_time is not None:
                 speed = (global_step - measure_burnin) / (time.time() - start_time)
                 if rank == 0:
                     pbar.set_description(f"{speed: 4.4f} sps, " + desc)
@@ -659,18 +748,14 @@ def main(rank: int, world_size: int):
                             )
                         else:
                             obs = envs.reset()
+                        cur_reward_sum.zero_()
+                        cur_episode_length.zero_()
 
-                if args.use_wandb and rank == 0:
-                    wandb.log(
-                        {
-                            "speed": speed,
-                            "frame": global_step * args.num_envs,
-                            "critic_lr": q_scheduler.get_last_lr()[0],
-                            "actor_lr": actor_scheduler.get_last_lr()[0],
-                            **logs,
-                        },
-                        step=global_step,
-                    )
+                scalar_logs = collect_train_scalars(
+                    logs, ep_infos, rewbuffer, lenbuffer, speed, global_step
+                )
+                write_scalar_logs(scalar_logs, global_step)
+                ep_infos.clear()
 
             if (
                 args.save_interval > 0
@@ -707,6 +792,9 @@ def main(rank: int, world_size: int):
             args,
             checkpoint_path(global_step, final=True),
         )
+        if writer is not None:
+            writer.flush()
+            writer.close()
 
     # Cleanup distributed training
     if is_distributed:

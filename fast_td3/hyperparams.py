@@ -22,8 +22,12 @@ class BaseArgs:
     """the name of this experiment"""
     project: str = "FastTD3"
     """the project name"""
-    use_wandb: bool = True
+    use_wandb: bool = False
     """whether to use wandb"""
+    log_tensorboard: bool = True
+    """whether to write TensorBoard logs into save_dir"""
+    log_interval: int = 100
+    """the interval to write training logs"""
     checkpoint_path: str = None
     """the path to the checkpoint file"""
     num_envs: int = 2048
