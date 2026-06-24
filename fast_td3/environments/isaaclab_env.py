@@ -1,7 +1,12 @@
+from contextlib import contextmanager
 from typing import Optional
 
 import gymnasium as gym
 import torch
+
+_APP_LAUNCHER = None
+_SIMULATION_APP = None
+_SIMULATION_DEVICE = None
 
 
 def _register_unitree_alias_if_needed(task_name: str) -> str:
@@ -15,6 +20,24 @@ def _register_unitree_alias_if_needed(task_name: str) -> str:
     return task_name
 
 
+def _ensure_simulation_app(device: str):
+    global _APP_LAUNCHER, _SIMULATION_APP, _SIMULATION_DEVICE
+
+    if _SIMULATION_APP is None:
+        from isaaclab.app import AppLauncher
+
+        _APP_LAUNCHER = AppLauncher(headless=True, device=device)
+        _SIMULATION_APP = _APP_LAUNCHER.app
+        _SIMULATION_DEVICE = device
+    elif device != _SIMULATION_DEVICE:
+        raise ValueError(
+            "IsaacLabEnv can only reuse one Isaac Sim app per process; "
+            f"already launched on {_SIMULATION_DEVICE!r}, requested {device!r}."
+        )
+
+    return _SIMULATION_APP
+
+
 class IsaacLabEnv:
     """Wrapper for IsaacLab Unitree environments used by FastTD3."""
 
@@ -26,10 +49,7 @@ class IsaacLabEnv:
         seed: int,
         action_bounds: Optional[float] = None,
     ):
-        from isaaclab.app import AppLauncher
-
-        app_launcher = AppLauncher(headless=True, device=device)
-        simulation_app = app_launcher.app
+        _ensure_simulation_app(device)
 
         task_name = _register_unitree_alias_if_needed(task_name)
 
@@ -58,6 +78,32 @@ class IsaacLabEnv:
         else:
             self.num_privileged_obs = 0
         self.num_actions = self.envs.unwrapped.single_action_space.shape[0]
+
+    def snapshot_curriculum(self) -> dict:
+        snapshot = {}
+        snapshot["commands"] = self._snapshot_command_ranges()
+        snapshot["terrain"] = self._snapshot_terrain_levels()
+        return snapshot
+
+    def apply_curriculum_snapshot(self, snapshot: Optional[dict]) -> None:
+        if not snapshot:
+            return
+        self._apply_command_ranges(snapshot.get("commands", {}))
+        self._apply_terrain_levels(snapshot.get("terrain", {}))
+
+    @contextmanager
+    def frozen_curriculum(self):
+        curriculum_manager = getattr(self.envs.unwrapped, "curriculum_manager", None)
+        if curriculum_manager is None:
+            yield
+            return
+
+        original_compute = curriculum_manager.compute
+        curriculum_manager.compute = lambda env_ids=None: None
+        try:
+            yield
+        finally:
+            curriculum_manager.compute = original_compute
 
     def reset(self, random_start_init: bool = True) -> torch.Tensor:
         obs_dict, _ = self.envs.reset()
@@ -97,3 +143,70 @@ class IsaacLabEnv:
         raise NotImplementedError(
             "We don't support rendering for IsaacLab environments"
         )
+
+    def close(self):
+        self.envs.close()
+
+    def _snapshot_command_ranges(self) -> dict:
+        env = self.envs.unwrapped
+        commands = {}
+        for command_name in ("base_velocity",):
+            try:
+                command_term = env.command_manager.get_term(command_name)
+            except (AttributeError, KeyError):
+                continue
+            command_data = {}
+            for attr_name in ("ranges", "limit_ranges"):
+                ranges = getattr(command_term.cfg, attr_name, None)
+                if ranges is None:
+                    continue
+                command_data[attr_name] = {
+                    key: list(value) if isinstance(value, tuple) else value
+                    for key, value in vars(ranges).items()
+                }
+            commands[command_name] = command_data
+        return commands
+
+    def _apply_command_ranges(self, commands: dict) -> None:
+        env = self.envs.unwrapped
+        for command_name, command_data in commands.items():
+            try:
+                command_term = env.command_manager.get_term(command_name)
+            except (AttributeError, KeyError):
+                continue
+            for attr_name, ranges_data in command_data.items():
+                ranges = getattr(command_term.cfg, attr_name, None)
+                if ranges is None:
+                    continue
+                for key, value in ranges_data.items():
+                    if not hasattr(ranges, key):
+                        continue
+                    if isinstance(value, list):
+                        value = tuple(value)
+                    setattr(ranges, key, value)
+
+    def _snapshot_terrain_levels(self) -> dict:
+        terrain = getattr(self.envs.unwrapped.scene, "terrain", None)
+        if terrain is None or not hasattr(terrain, "terrain_levels"):
+            return {}
+        return {"terrain_levels": terrain.terrain_levels.detach().cpu()}
+
+    def _apply_terrain_levels(self, terrain_data: dict) -> None:
+        terrain = getattr(self.envs.unwrapped.scene, "terrain", None)
+        if terrain is None or not hasattr(terrain, "terrain_levels"):
+            return
+        source_levels = terrain_data.get("terrain_levels")
+        if source_levels is None:
+            return
+        target_levels = terrain.terrain_levels
+        source_levels = source_levels.to(device=target_levels.device, dtype=target_levels.dtype)
+        if source_levels.shape != target_levels.shape:
+            return
+
+        target_levels.copy_(source_levels)
+        if getattr(terrain, "terrain_origins", None) is None:
+            return
+
+        env_ids = torch.arange(target_levels.shape[0], device=target_levels.device)
+        no_move = torch.zeros_like(target_levels, dtype=torch.bool)
+        terrain.update_env_origins(env_ids, no_move, no_move)

@@ -5,9 +5,13 @@ os.environ["OMP_NUM_THREADS"] = "1"
 
 import statistics
 import random
+import json
+import subprocess
+import sys
 import time
 import math
 from collections import deque
+from pathlib import Path
 
 import tqdm
 import wandb
@@ -61,6 +65,7 @@ def main(rank: int, world_size: int):
         print(args)
     run_name = f"{args.env_name}__{args.exp_name}__{args.seed}"
     checkpoint_prefix = args.checkpoint_prefix or run_name
+    eval_checkpoint_path = os.path.join(args.save_dir, "eval", f"{run_name}_rank{rank}_eval_latest.pt")
 
     def checkpoint_path(step=None, final: bool = False) -> str:
         if final and not args.save_final_as_step:
@@ -316,36 +321,53 @@ def main(rank: int, world_size: int):
     policy_noise = args.policy_noise
     noise_clip = args.noise_clip
 
-    def evaluate():
-        num_envs = envs.num_envs
-        episode_returns = torch.zeros(num_envs, device=device)
-        episode_lengths = torch.zeros(num_envs, device=device)
-        done_masks = torch.zeros(num_envs, dtype=torch.bool, device=device)
-
-        obs = envs.reset(random_start_init=False)
-
-        # Run for a fixed number of steps
-        for i in range(envs.max_episode_steps):
-            with torch.no_grad(), autocast(
-                device_type=amp_device_type, dtype=amp_dtype, enabled=amp_enabled
-            ):
-                obs = normalize_obs(obs, update=False)
-                actions = actor(obs)
-
-            next_obs, rewards, dones, _ = envs.step(actions.float())
-
-            episode_returns = torch.where(
-                ~done_masks, episode_returns + rewards, episode_returns
+    def evaluate(step: int):
+        save_params(
+            step,
+            actor,
+            qnet,
+            qnet_target,
+            obs_normalizer,
+            critic_obs_normalizer,
+            args,
+            eval_checkpoint_path,
+            extra_state={"curriculum_snapshot": envs.snapshot_curriculum()},
+        )
+        eval_script = Path(__file__).resolve().with_name("eval_unitree.py")
+        command = [
+            sys.executable,
+            str(eval_script),
+            "--checkpoint",
+            eval_checkpoint_path,
+            "--env-name",
+            args.env_name,
+            "--device",
+            isaac_device,
+            "--num-envs",
+            str(args.num_envs),
+            "--seed",
+            str(args.seed + args.eval_seed_offset + rank),
+            "--action-bounds",
+            str(args.action_bounds),
+            "--amp-dtype",
+            args.amp_dtype,
+        ]
+        if args.amp:
+            command.append("--amp")
+        result = subprocess.run(command, text=True, capture_output=True)
+        if result.returncode != 0:
+            raise RuntimeError(
+                "Evaluation subprocess failed"
+                f"\nstdout:\n{result.stdout}"
+                f"\nstderr:\n{result.stderr}"
             )
-            episode_lengths = torch.where(
-                ~done_masks, episode_lengths + 1, episode_lengths
-            )
-            done_masks = torch.logical_or(done_masks, dones)
-            if done_masks.all():
-                break
-            obs = next_obs
-
-        return episode_returns.mean(), episode_lengths.mean()
+        for line in reversed(result.stdout.splitlines()):
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            payload = json.loads(line)
+            return payload["eval_avg_return"], payload["eval_avg_length"]
+        raise RuntimeError(f"Evaluation subprocess did not return JSON:\n{result.stdout}")
 
     def scalar_value(value):
         if isinstance(value, torch.Tensor):
@@ -721,7 +743,7 @@ def main(rank: int, world_size: int):
                     }
 
                     if args.eval_interval > 0 and global_step % args.eval_interval == 0:
-                        local_eval_avg_return, local_eval_avg_length = evaluate()
+                        local_eval_avg_return, local_eval_avg_length = evaluate(global_step)
                         eval_results = torch.tensor(
                             [local_eval_avg_return, local_eval_avg_length],
                             device=device,
@@ -739,17 +761,6 @@ def main(rank: int, world_size: int):
                             )
                             logs["eval_avg_return"] = global_avg_return
                             logs["eval_avg_length"] = global_avg_length
-
-                        # NOTE: Hacky way of evaluating performance, but just works
-                        if envs.asymmetric_obs:
-                            obs, critic_obs = envs.reset_with_critic_obs()
-                            critic_obs = torch.as_tensor(
-                                critic_obs, device=device, dtype=torch.float
-                            )
-                        else:
-                            obs = envs.reset()
-                        cur_reward_sum.zero_()
-                        cur_episode_length.zero_()
 
                 scalar_logs = collect_train_scalars(
                     logs, ep_infos, rewbuffer, lenbuffer, speed, global_step
@@ -795,6 +806,8 @@ def main(rank: int, world_size: int):
         if writer is not None:
             writer.flush()
             writer.close()
+
+    envs.close()
 
     # Cleanup distributed training
     if is_distributed:

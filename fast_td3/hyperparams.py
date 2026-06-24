@@ -10,7 +10,7 @@ class BaseArgs:
     """the id of the IsaacLab/Unitree environment"""
     agent: str = "fasttd3"
     """the agent to use: currently support [fasttd3, fasttd3_simbav2]"""
-    seed: int = 1
+    seed: int = 3407
     """seed of the experiment"""
     torch_deterministic: bool = True
     """if toggled, `torch.backends.cudnn.deterministic=False`"""
@@ -22,7 +22,7 @@ class BaseArgs:
     """the name of this experiment"""
     project: str = "FastTD3"
     """the project name"""
-    use_wandb: bool = False
+    use_wandb: bool = True
     """whether to use wandb"""
     log_tensorboard: bool = True
     """whether to write TensorBoard logs into save_dir"""
@@ -30,7 +30,7 @@ class BaseArgs:
     """the interval to write training logs"""
     checkpoint_path: str = None
     """the path to the checkpoint file"""
-    num_envs: int = 2048
+    num_envs: int = 256
     """the number of environments to run in parallel"""
     total_timesteps: int = 50000
     """total timesteps of the experiments"""
@@ -42,7 +42,7 @@ class BaseArgs:
     """the learning rate of the critic at the end of training"""
     actor_learning_rate_end: float = 3e-4
     """the learning rate for the actor at the end of training"""
-    buffer_size: int = 1024
+    buffer_size: int = 10240
     """the replay memory buffer size per environment"""
     num_steps: int = 1
     """the number of steps to use for the multi-step return"""
@@ -88,6 +88,8 @@ class BaseArgs:
     """Number of burn-in iterations for speed measure."""
     eval_interval: int = 1000
     """the interval to evaluate the model"""
+    eval_seed_offset: int = 1000003
+    """large prime added to the training seed for the evaluation environment"""
     render_interval: int = 0
     """the interval to render the model; IsaacLab rendering is unsupported here"""
     compile: bool = True

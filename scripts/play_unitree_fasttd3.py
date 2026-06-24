@@ -45,15 +45,19 @@ _prioritize_venv_site_packages()
 
 from isaaclab.app import AppLauncher
 
-from fast_td3.unitree_bridge import UNITREE_TASK, add_unitree_source_path, unitree_rl_lab_root
-from fast_td3.unitree_fasttd3_preset import UNITREE_FASTTD3_LOG_EXPERIMENT_NAME
+from fast_td3.unitree_bridge import (
+    UNITREE_LOG_EXPERIMENT_NAME,
+    UNITREE_TASK,
+    add_unitree_source_path,
+    unitree_rl_lab_root,
+)
 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Play and export a Unitree FastTD3 checkpoint.")
     parser.add_argument("--unitree_rl_lab_path", default=None, help="Path to unitree_rl_lab.")
     parser.add_argument("--task", default=UNITREE_TASK, help="Unitree Isaac Lab task name.")
-    parser.add_argument("--experiment_name", default=UNITREE_FASTTD3_LOG_EXPERIMENT_NAME)
+    parser.add_argument("--experiment_name", default=UNITREE_LOG_EXPERIMENT_NAME)
     parser.add_argument("--load_run", default=None, help="Run directory under logs/rsl_rl/<experiment_name>.")
     parser.add_argument("--checkpoint", default=None, help="Checkpoint path or filename inside --load_run.")
     parser.add_argument("--num_envs", type=int, default=1, help="Number of environments to simulate.")

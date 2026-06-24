@@ -20,15 +20,13 @@ from unitree_bridge import (
     add_unitree_source_path,
     FASTTD3_UNITREE_ALIAS,
     repo_root,
+    UNITREE_LOG_EXPERIMENT_NAME,
+    UNITREE_TASK,
 )
-from unitree_fasttd3_preset import (
-    UNITREE_FASTTD3_BOOL_DEFAULTS,
-    UNITREE_FASTTD3_EXP_NAME,
-    UNITREE_FASTTD3_LAUNCHER_DEFAULTS,
-    UNITREE_FASTTD3_LOG_EXPERIMENT_NAME,
-    UNITREE_FASTTD3_PROJECT,
-    UNITREE_FASTTD3_TASK,
-)
+
+
+FASTTD3_EXP_NAME = "UnitreeFastTD3"
+FASTTD3_PROJECT = "UnitreeFastTD3"
 
 
 def _prioritize_venv_site_packages() -> None:
@@ -63,8 +61,8 @@ def _prioritize_venv_site_packages() -> None:
 def _extract_launcher_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--unitree_rl_lab_path", default=None)
-    parser.add_argument("--task", default=UNITREE_FASTTD3_TASK)
-    parser.add_argument("--experiment_name", default=UNITREE_FASTTD3_LOG_EXPERIMENT_NAME)
+    parser.add_argument("--task", default=UNITREE_TASK)
+    parser.add_argument("--experiment_name", default=UNITREE_LOG_EXPERIMENT_NAME)
     parser.add_argument("--run_name", default=None)
     parser.add_argument("--log_root_path", default=None)
     return parser.parse_known_args(argv)
@@ -148,8 +146,8 @@ def _set_env_name(argv: list[str], env_name: str) -> list[str]:
 
 def main() -> None:
     launcher_args, train_args = _extract_launcher_args(sys.argv[1:])
-    if launcher_args.task != UNITREE_FASTTD3_TASK:
-        raise ValueError(f"Only {UNITREE_FASTTD3_TASK!r} is wired for this launcher")
+    if launcher_args.task != UNITREE_TASK:
+        raise ValueError(f"Only {UNITREE_TASK!r} is wired for this launcher")
 
     _prioritize_venv_site_packages()
     add_fasttd3_script_path()
@@ -169,19 +167,9 @@ def main() -> None:
     train_args = _remove_task_args(train_args)
     train_args = _set_env_name(train_args, FASTTD3_UNITREE_ALIAS)
     if not _has_arg(train_args, "--exp_name", "--exp-name"):
-        train_args.extend(["--exp_name", UNITREE_FASTTD3_EXP_NAME])
+        train_args.extend(["--exp_name", FASTTD3_EXP_NAME])
     if not _has_arg(train_args, "--project"):
-        train_args.extend(["--project", UNITREE_FASTTD3_PROJECT])
-    for name, value in UNITREE_FASTTD3_LAUNCHER_DEFAULTS:
-        train_args = _append_default(train_args, name, value)
-    for enabled_name, disabled_name, enabled, base_default in UNITREE_FASTTD3_BOOL_DEFAULTS:
-        train_args = _append_bool_default(
-            train_args,
-            enabled_name,
-            disabled_name,
-            enabled,
-            base_default,
-        )
+        train_args.extend(["--project", FASTTD3_PROJECT])
     train_args = _append_default(train_args, "--save_dir", str(log_dir))
     train_args = _append_default(train_args, "--checkpoint_prefix", "model")
     train_args = _append_bool_default(

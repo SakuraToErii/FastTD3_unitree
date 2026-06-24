@@ -5,6 +5,7 @@ from pathlib import Path
 
 UNITREE_TASK = "Unitree-G1-29dof-Velocity"
 FASTTD3_UNITREE_ALIAS = "Isaac-Unitree-G1-29dof-Velocity"
+UNITREE_LOG_EXPERIMENT_NAME = "unitree_g1_29dof_velocity"
 DEFAULT_UNITREE_RL_LAB_PATH = Path("/home/ordis/projects/unitree_rl_lab")
 
 

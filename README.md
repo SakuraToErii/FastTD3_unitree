@@ -110,6 +110,7 @@ scripts/play_unitree_fasttd3.py       # FastTD3 checkpoint 播放与导出
 scripts/train.sh                      # 批量训练入口
 fast_td3/train.py                     # 单卡 FastTD3 训练主循环
 fast_td3/train_multigpu.py            # 可选多卡训练入口
+fast_td3/eval_unitree.py              # 独立进程评估入口
 fast_td3/hyperparams.py               # Unitree FastTD3 参数
 fast_td3/environments/isaaclab_env.py # Isaac Lab 环境包装
 fast_td3/unitree_bridge.py            # unitree_rl_lab 路径和任务注册桥接
