@@ -36,6 +36,7 @@ from tensordict import TensorDict
 
 from fast_td3_utils import (
     EmpiricalNormalization,
+    IdentityNormalizer,
     RewardNormalizer,
     PerTaskRewardNormalizer,
     SimpleReplayBuffer,
@@ -76,6 +77,39 @@ def main(rank: int, world_size: int):
     if rank == 0:
         print(args)
     run_name = f"{args.env_name}__{args.exp_name}__{args.seed}"
+    checkpoint_prefix = args.checkpoint_prefix or run_name
+
+    def checkpoint_path(step=None, final: bool = False) -> str:
+        if final and not args.save_final_as_step:
+            filename = f"{run_name}_final.pt"
+        else:
+            if step is None:
+                raise ValueError("step must be provided for step-named checkpoints")
+            filename = f"{checkpoint_prefix}_{step}.pt"
+        return os.path.join(args.save_dir, filename)
+
+    def export_unitree_params(envs, env_type: str) -> None:
+        if not args.export_unitree_params or rank != 0:
+            return
+        if env_type != "isaaclab":
+            raise ValueError("--export_unitree_params is only supported for IsaacLab environments")
+
+        import inspect
+        import shutil
+
+        from isaaclab.utils.io import dump_yaml
+        from unitree_rl_lab.utils.export_deploy_cfg import export_deploy_cfg
+
+        params_dir = os.path.join(args.save_dir, "params")
+        dump_yaml(os.path.join(params_dir, "env.yaml"), envs.env_cfg)
+        dump_yaml(os.path.join(params_dir, "agent.yaml"), vars(args))
+        export_deploy_cfg(envs.envs.unwrapped, args.save_dir)
+
+        env_cfg_file = inspect.getfile(envs.env_cfg.__class__)
+        shutil.copy(
+            env_cfg_file,
+            os.path.join(params_dir, os.path.basename(env_cfg_file)),
+        )
 
     amp_enabled = args.amp and args.cuda and torch.cuda.is_available()
     amp_device_type = (
@@ -158,6 +192,8 @@ def main(rank: int, world_size: int):
             use_push_randomization=args.use_push_randomization,
         )
 
+    export_unitree_params(envs, env_type)
+
     n_act = envs.num_actions
     n_obs = envs.num_obs if type(envs.num_obs) == int else envs.num_obs[0]
     if envs.asymmetric_obs:
@@ -176,8 +212,8 @@ def main(rank: int, world_size: int):
             shape=n_critic_obs, device=device
         )
     else:
-        obs_normalizer = nn.Identity()
-        critic_obs_normalizer = nn.Identity()
+        obs_normalizer = IdentityNormalizer()
+        critic_obs_normalizer = IdentityNormalizer()
 
     if args.reward_normalization:
         if env_type in ["mtbench"]:
@@ -579,8 +615,10 @@ def main(rank: int, world_size: int):
         update_main = torch.compile(update_main, mode=compile_mode)
         update_pol = torch.compile(update_pol, mode=compile_mode)
         policy = torch.compile(policy, mode=None)
-        normalize_obs = torch.compile(obs_normalizer.forward, mode=None)
-        normalize_critic_obs = torch.compile(critic_obs_normalizer.forward, mode=None)
+        # Keep stateful running-stat normalizers eager. Inductor/Triton can
+        # fail compiling their fused mean/var + buffer update kernels.
+        normalize_obs = obs_normalizer.forward
+        normalize_critic_obs = critic_obs_normalizer.forward
         if args.reward_normalization:
             update_stats = torch.compile(reward_normalizer.update_stats, mode=None)
         normalize_reward = torch.compile(reward_normalizer.forward, mode=None)
@@ -800,7 +838,7 @@ def main(rank: int, world_size: int):
                     obs_normalizer,
                     critic_obs_normalizer,
                     args,
-                    f"models/{run_name}_{global_step}.pt",
+                    checkpoint_path(global_step),
                 )
 
         global_step += 1
@@ -809,16 +847,17 @@ def main(rank: int, world_size: int):
         if rank == 0:
             pbar.update(1)
 
-    save_params(
-        global_step,
-        actor,
-        qnet,
-        qnet_target,
-        obs_normalizer,
-        critic_obs_normalizer,
-        args,
-        f"models/{run_name}_final.pt",
-    )
+    if rank == 0:
+        save_params(
+            global_step,
+            actor,
+            qnet,
+            qnet_target,
+            obs_normalizer,
+            critic_obs_normalizer,
+            args,
+            checkpoint_path(global_step, final=True),
+        )
 
     # Cleanup distributed training
     if is_distributed:

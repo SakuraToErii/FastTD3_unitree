@@ -1,6 +1,7 @@
+import argparse
 import os
-from dataclasses import dataclass
-import tyro
+from dataclasses import dataclass, fields
+from typing import Any
 
 
 @dataclass
@@ -124,6 +125,14 @@ class BaseArgs:
     """the weight decay of the optimizer"""
     save_interval: int = 5000
     """the interval to save the model"""
+    save_dir: str = "models"
+    """the directory where checkpoints are saved"""
+    checkpoint_prefix: str = None
+    """the checkpoint filename prefix; defaults to the run name"""
+    save_final_as_step: bool = False
+    """save the final checkpoint as <prefix>_<global_step>.pt instead of <run_name>_final.pt"""
+    export_unitree_params: bool = False
+    """export Unitree deploy/env/agent params into save_dir/params for IsaacLab Unitree runs"""
 
     sim_type: str = ""
     """SimNorm mode: '', sim_actor, sim_critic, or sim_both"""
@@ -134,12 +143,65 @@ class BaseArgs:
     actor_seq_len: int = 8
     """the number of simplices used in the actor head"""
 
+
+def _parse_bool(value: str) -> bool:
+    if value.lower() in {"1", "true", "t", "yes", "y", "on"}:
+        return True
+    if value.lower() in {"0", "false", "f", "no", "n", "off"}:
+        return False
+    raise argparse.ArgumentTypeError(f"invalid boolean value: {value!r}")
+
+
+def _option_aliases(name: str) -> list[str]:
+    aliases = [f"--{name}"]
+    hyphen_name = name.replace("_", "-")
+    if hyphen_name != name:
+        aliases.append(f"--{hyphen_name}")
+    return aliases
+
+
+def _argparse_cli(args_class: type[BaseArgs]) -> BaseArgs:
+    parser = argparse.ArgumentParser()
+    defaults: dict[str, Any] = {}
+    for field in fields(args_class):
+        name = field.name
+        default = getattr(args_class, name)
+        defaults[name] = default
+        option_aliases = _option_aliases(name)
+
+        if isinstance(default, bool):
+            group = parser.add_mutually_exclusive_group()
+            group.add_argument(
+                *option_aliases,
+                dest=name,
+                nargs="?",
+                const=True,
+                type=_parse_bool,
+            )
+            group.add_argument(
+                *_option_aliases(f"no_{name}"),
+                dest=name,
+                action="store_false",
+            )
+            continue
+
+        value_type = field.type if default is None else type(default)
+        parser.add_argument(*option_aliases, dest=name, type=value_type)
+
+    parser.set_defaults(**defaults)
+    return args_class(**vars(parser.parse_args()))
+
+
+def _cli(args_class: type[BaseArgs]) -> BaseArgs:
+    return _argparse_cli(args_class)
+
+
 def get_args():
     """
     Parse command-line arguments and return the appropriate Args instance based on env_name.
     """
     # First, parse all arguments using the base Args class
-    base_args = tyro.cli(BaseArgs)
+    base_args = _cli(BaseArgs)
 
     # Map environment names to their specific Args classes
     # For tasks not here, default hyperparameters are used
@@ -191,21 +253,21 @@ def get_args():
     if base_args.env_name in env_to_args_class:
         specific_args_class = env_to_args_class[base_args.env_name]
         # Re-parse with the specific class, maintaining any user overrides
-        specific_args = tyro.cli(specific_args_class)
+        specific_args = _cli(specific_args_class)
         return specific_args
 
     if base_args.env_name.startswith("h1hand-") or base_args.env_name.startswith("h1-"):
         # HumanoidBench
-        specific_args = tyro.cli(HumanoidBenchArgs)
+        specific_args = _cli(HumanoidBenchArgs)
     elif base_args.env_name.startswith("Isaac-"):
         # IsaacLab
-        specific_args = tyro.cli(IsaacLabArgs)
+        specific_args = _cli(IsaacLabArgs)
     elif base_args.env_name.startswith("MTBench-"):
         # MTBench
-        specific_args = tyro.cli(MTBenchArgs)
+        specific_args = _cli(MTBenchArgs)
     else:
         # MuJoCo Playground
-        specific_args = tyro.cli(MuJoCoPlaygroundArgs)
+        specific_args = _cli(MuJoCoPlaygroundArgs)
     return specific_args
 
 

@@ -4,6 +4,17 @@ import gymnasium as gym
 import torch
 
 
+def _register_unitree_alias_if_needed(task_name: str) -> str:
+    try:
+        from unitree_bridge import FASTTD3_UNITREE_ALIAS, register_unitree_alias
+    except ModuleNotFoundError:
+        from fast_td3.unitree_bridge import FASTTD3_UNITREE_ALIAS, register_unitree_alias
+
+    if task_name == FASTTD3_UNITREE_ALIAS:
+        return register_unitree_alias()
+    return task_name
+
+
 class IsaacLabEnv:
     """Wrapper for IsaacLab environments to be compatible with MuJoCo Playground"""
 
@@ -20,6 +31,8 @@ class IsaacLabEnv:
         app_launcher = AppLauncher(headless=True, device=device)
         simulation_app = app_launcher.app
 
+        task_name = _register_unitree_alias_if_needed(task_name)
+
         import isaaclab_tasks
         from isaaclab_tasks.utils.parse_cfg import parse_env_cfg
 
@@ -29,6 +42,7 @@ class IsaacLabEnv:
             num_envs=num_envs,
         )
         env_cfg.seed = seed
+        self.env_cfg = env_cfg
         self.seed = seed
         self.envs = gym.make(task_name, cfg=env_cfg, render_mode=None)
 

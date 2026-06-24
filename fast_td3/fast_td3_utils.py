@@ -497,6 +497,15 @@ class EmpiricalNormalization(nn.Module):
         return y * (self._std + self.eps) + self._mean
 
 
+class IdentityNormalizer(nn.Module):
+    """No-op normalizer with an EmpiricalNormalization-compatible signature."""
+
+    def forward(
+        self, x: torch.Tensor, center: bool = True, update: bool = True
+    ) -> torch.Tensor:
+        return x
+
+
 class RewardNormalizer(nn.Module):
     def __init__(
         self,

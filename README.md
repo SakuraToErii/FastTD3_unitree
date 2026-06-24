@@ -292,7 +292,7 @@ A Jupyter notebook (`training_notebook.ipynb`) is available to help you get star
 
 ## 🤖 Sim-to-Real RL with FastTD3
 
-We provide the [walkthrough](sim2real.md) for training deployable policies with FastTD3.
+For the Unitree G1 workflow in this fork, see [docs/unitree_fasttd3.md](docs/unitree_fasttd3.md).
 
 ## Contributing
 
