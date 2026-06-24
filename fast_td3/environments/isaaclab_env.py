@@ -107,15 +107,20 @@ class IsaacLabEnv:
 
     def reset(self, random_start_init: bool = True) -> torch.Tensor:
         obs_dict, _ = self.envs.reset()
-        # NOTE: decorrelate episode horizons like RSL‑RL
         if random_start_init:
             self.envs.unwrapped.episode_length_buf = torch.randint_like(
                 self.envs.unwrapped.episode_length_buf, high=int(self.max_episode_steps)
             )
         return obs_dict["policy"]
 
-    def reset_with_critic_obs(self) -> tuple[torch.Tensor, torch.Tensor]:
+    def reset_with_critic_obs(
+        self, random_start_init: bool = True
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         obs_dict, _ = self.envs.reset()
+        if random_start_init:
+            self.envs.unwrapped.episode_length_buf = torch.randint_like(
+                self.envs.unwrapped.episode_length_buf, high=int(self.max_episode_steps)
+            )
         return obs_dict["policy"], obs_dict["critic"]
 
     def step(
@@ -184,6 +189,40 @@ class IsaacLabEnv:
                     if isinstance(value, list):
                         value = tuple(value)
                     setattr(ranges, key, value)
+
+    def curriculum_scalars(self) -> dict[str, float]:
+        scalars = {}
+        env = self.envs.unwrapped
+        try:
+            command_term = env.command_manager.get_term("base_velocity")
+        except (AttributeError, KeyError):
+            command_term = None
+        if command_term is not None:
+            ranges = command_term.cfg.ranges
+            for name in ("lin_vel_x", "lin_vel_y", "ang_vel_z"):
+                value = getattr(ranges, name, None)
+                if value is None:
+                    continue
+                scalars[f"Curriculum/base_velocity/{name}_min"] = float(value[0])
+                scalars[f"Curriculum/base_velocity/{name}_max"] = float(value[1])
+
+        terrain = getattr(env.scene, "terrain", None)
+        if terrain is not None and hasattr(terrain, "terrain_levels"):
+            levels = terrain.terrain_levels.float()
+            scalars["Curriculum/terrain/level_mean"] = levels.mean().item()
+            scalars["Curriculum/terrain/level_max"] = levels.max().item()
+
+        try:
+            episode_sums = env.reward_manager._episode_sums
+            reward_term = env.reward_manager.get_term_cfg("track_lin_vel_xy")
+        except (AttributeError, KeyError):
+            return scalars
+        reward = episode_sums["track_lin_vel_xy"].mean() / env.max_episode_length_s
+        scalars["Curriculum/base_velocity/track_lin_vel_xy_mean"] = reward.item()
+        scalars["Curriculum/base_velocity/track_lin_vel_xy_threshold"] = float(
+            reward_term.weight * 0.8
+        )
+        return scalars
 
     def _snapshot_terrain_levels(self) -> dict:
         terrain = getattr(self.envs.unwrapped.scene, "terrain", None)

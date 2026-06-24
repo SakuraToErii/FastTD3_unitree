@@ -6,6 +6,14 @@ from pathlib import Path
 import torch
 
 
+def _prepend_repo_root() -> Path:
+    repo_root = Path(__file__).resolve().parents[1]
+    repo_root_str = str(repo_root)
+    sys.path[:] = [path for path in sys.path if path != repo_root_str]
+    sys.path.insert(0, repo_root_str)
+    return repo_root
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Evaluate a Unitree FastTD3 checkpoint in a separate Isaac Sim process."
@@ -28,10 +36,7 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = _parse_args()
-    repo_root = Path(__file__).resolve().parents[1]
-    repo_root_str = str(repo_root)
-    if repo_root_str not in sys.path:
-        sys.path.insert(0, repo_root_str)
+    _prepend_repo_root()
 
     from fast_td3.environments.isaaclab_env import IsaacLabEnv
     from fast_td3.unitree_policy import load_policy

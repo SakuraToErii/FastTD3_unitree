@@ -304,12 +304,19 @@ def main():
             eval_checkpoint_path,
             extra_state={"curriculum_snapshot": envs.snapshot_curriculum()},
         )
-        eval_script = Path(__file__).resolve().with_name("eval_unitree.py")
+        repo_root = Path(__file__).resolve().parents[1]
+        eval_env = os.environ.copy()
+        eval_env["PYTHONPATH"] = (
+            f"{repo_root}{os.pathsep}{eval_env['PYTHONPATH']}"
+            if eval_env.get("PYTHONPATH")
+            else str(repo_root)
+        )
         command = [
             sys.executable,
-            str(eval_script),
+            "-m",
+            "fast_td3.eval_unitree",
             "--checkpoint",
-            eval_checkpoint_path,
+            str(Path(eval_checkpoint_path).resolve()),
             "--env-name",
             args.env_name,
             "--device",
@@ -325,7 +332,13 @@ def main():
         ]
         if args.amp:
             command.append("--amp")
-        result = subprocess.run(command, text=True, capture_output=True)
+        result = subprocess.run(
+            command,
+            text=True,
+            capture_output=True,
+            cwd=repo_root,
+            env=eval_env,
+        )
         if result.returncode != 0:
             raise RuntimeError(
                 "Evaluation subprocess failed"
@@ -391,6 +404,7 @@ def main():
         if "eval_avg_return" in logs:
             scalars["Eval/avg_return"] = scalar_value(logs["eval_avg_return"])
             scalars["Eval/avg_length"] = scalar_value(logs["eval_avg_length"])
+        scalars.update(envs.curriculum_scalars())
         scalars.update(collect_episode_info_scalars(ep_infos))
         return scalars
 
@@ -550,10 +564,12 @@ def main():
         normalize_reward = reward_normalizer.forward
 
     if envs.asymmetric_obs:
-        obs, critic_obs = envs.reset_with_critic_obs()
+        obs, critic_obs = envs.reset_with_critic_obs(
+            random_start_init=args.random_start_init
+        )
         critic_obs = torch.as_tensor(critic_obs, device=device, dtype=torch.float)
     else:
-        obs = envs.reset()
+        obs = envs.reset(random_start_init=args.random_start_init)
     if args.checkpoint_path:
         # Load checkpoint if specified
         torch_checkpoint = torch.load(

@@ -128,6 +128,8 @@ class BaseArgs:
     """save the final checkpoint as <prefix>_<global_step>.pt instead of <run_name>_final.pt"""
     export_unitree_params: bool = False
     """export Unitree deploy/env/agent params into save_dir/params"""
+    random_start_init: bool = True
+    """randomize initial episode lengths after reset, matching Unitree/RSL-RL PPO training"""
 
     sim_type: str = ""
     """SimNorm mode: '', sim_actor, sim_critic, or sim_both"""
