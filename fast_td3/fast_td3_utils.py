@@ -501,6 +501,38 @@ def save_params(
     print(f"Saved parameters and configuration to {save_path}")
 
 
+def save_eval_snapshot(
+    global_step,
+    actor,
+    obs_normalizer,
+    args,
+    save_path,
+    extra_state=None,
+):
+    """Save the minimal policy state needed by the isolated evaluator."""
+
+    def get_state_dict(model):
+        if hasattr(model, "module"):
+            return model.module.state_dict()
+        return model.state_dict()
+
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    save_dict = {
+        "actor_state_dict": cpu_state(get_state_dict(actor)),
+        "obs_normalizer_state": (
+            cpu_state(obs_normalizer.state_dict())
+            if hasattr(obs_normalizer, "state_dict")
+            else None
+        ),
+        "args": vars(args),
+        "global_step": global_step,
+    }
+    if extra_state:
+        save_dict.update(extra_state)
+    torch.save(save_dict, save_path, _use_new_zipfile_serialization=True)
+    print(f"Saved evaluation snapshot to {save_path}")
+
+
 def get_ddp_state_dict(model):
     """Get state dict from model, handling DDP wrapper if present."""
     if hasattr(model, "module"):

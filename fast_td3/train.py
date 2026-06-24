@@ -30,6 +30,7 @@ from fast_td3_utils import (
     IdentityNormalizer,
     RewardNormalizer,
     SimpleReplayBuffer,
+    save_eval_snapshot,
     save_params,
     mark_step,
 )
@@ -295,13 +296,10 @@ def main():
     noise_clip = args.noise_clip
 
     def evaluate(step: int):
-        save_params(
+        save_eval_snapshot(
             step,
             actor,
-            qnet,
-            qnet_target,
             obs_normalizer,
-            critic_obs_normalizer,
             args,
             eval_checkpoint_path,
             extra_state={"curriculum_snapshot": envs.snapshot_curriculum()},
@@ -317,7 +315,7 @@ def main():
             "--device",
             str(device),
             "--num-envs",
-            str(args.num_envs),
+            str(args.eval_num_envs),
             "--seed",
             str(args.seed + args.eval_seed_offset),
             "--action-bounds",

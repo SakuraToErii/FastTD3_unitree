@@ -88,6 +88,8 @@ class BaseArgs:
     """Number of burn-in iterations for speed measure."""
     eval_interval: int = 1000
     """the interval to evaluate the model"""
+    eval_num_envs: int = 128
+    """the number of environments to use in the separate evaluation process"""
     eval_seed_offset: int = 1000003
     """large prime added to the training seed for the evaluation environment"""
     render_interval: int = 0

@@ -1,6 +1,6 @@
 # Evaluation Isolation Record
 
-Implementation commit: `77c7efd Isolate Unitree FastTD3 evaluation`
+Initial implementation commit: `77c7efd Isolate Unitree FastTD3 evaluation`
 
 This note records why Unitree FastTD3 evaluation is isolated from the training process, what was implemented, and what tradeoffs were accepted.
 
@@ -24,7 +24,7 @@ Evaluation now runs in a separate Python process through `fast_td3/eval_unitree.
 
 The training process does this on each eval interval:
 
-1. Saves a temporary checkpoint under `<run>/eval/`.
+1. Saves a temporary policy snapshot under `<run>/eval/`.
 2. Adds `curriculum_snapshot` to that checkpoint.
 3. Launches `fast_td3/eval_unitree.py` with `sys.executable`.
 4. Parses the final JSON line returned by the eval process.
@@ -32,11 +32,12 @@ The training process does this on each eval interval:
 The eval process does this:
 
 1. Starts its own Isaac Sim / IsaacLab environment.
-2. Uses a seed separated from training by `eval_seed_offset`.
-3. Loads the FastTD3 actor and observation normalizer from the temporary checkpoint.
-4. Applies the training curriculum snapshot before evaluation reset.
-5. Freezes its own curriculum manager while evaluating.
-6. Returns `eval_avg_return` and `eval_avg_length` as JSON.
+2. Uses `eval_num_envs` environments, default `128`.
+3. Uses a seed separated from training by `eval_seed_offset`.
+4. Loads the FastTD3 actor and observation normalizer from the temporary snapshot.
+5. Applies the training curriculum snapshot before evaluation reset.
+6. Freezes its own curriculum manager while evaluating.
+7. Returns `eval_avg_return` and `eval_avg_length` as JSON.
 
 This keeps eval reset, eval step, and eval curriculum updates out of the training process.
 
@@ -46,8 +47,8 @@ This keeps eval reset, eval step, and eval curriculum updates out of the trainin
 - `fast_td3/train_multigpu.py`: multi-GPU trainer does the same per rank, then averages eval metrics across ranks.
 - `fast_td3/eval_unitree.py`: standalone eval subprocess entry point.
 - `fast_td3/environments/isaaclab_env.py`: exposes curriculum snapshot, apply, freeze, and close helpers.
-- `fast_td3/fast_td3_utils.py`: `save_params()` accepts optional `extra_state` for the eval-only curriculum snapshot.
-- `fast_td3/hyperparams.py`: adds `eval_seed_offset`, default `1000003`.
+- `fast_td3/fast_td3_utils.py`: `save_eval_snapshot()` writes the minimal actor/normalizer eval state, and `save_params()` keeps full training checkpoints.
+- `fast_td3/hyperparams.py`: adds `eval_num_envs`, default `128`, and `eval_seed_offset`, default `1000003`.
 - `docs/unitree_fasttd3.md`: points readers to this implementation note.
 
 ## Seeds
@@ -74,6 +75,22 @@ Evaluation should not advance training curriculum, but it should measure the pol
 - current terrain levels, when terrain curriculum is active
 
 The eval process applies that snapshot to its own environment before reset, then freezes curriculum compute during evaluation. That means eval sees the same current difficulty but cannot mutate training state.
+
+If training uses more environments than evaluation, the terrain-level snapshot is truncated to the eval environment count. This keeps eval lightweight while still sampling from the current training terrain curriculum state.
+
+## Policy And Gradients
+
+The eval process receives the current policy through the temporary eval snapshot. That snapshot contains:
+
+- actor state dict
+- observation normalizer state
+- training args
+- global step
+- curriculum snapshot
+
+It intentionally does not contain critic networks, target critic networks, optimizers, reward normalizer state, or replay buffer data. The eval process does not create a replay buffer.
+
+The eval rollout uses `torch.inference_mode()` and `policy.eval()`, so it does not build an autograd graph and does not send gradients back to the training process. The evaluator only returns scalar metrics through JSON.
 
 ## Tradeoffs
 

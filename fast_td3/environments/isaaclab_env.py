@@ -200,8 +200,10 @@ class IsaacLabEnv:
             return
         target_levels = terrain.terrain_levels
         source_levels = source_levels.to(device=target_levels.device, dtype=target_levels.dtype)
-        if source_levels.shape != target_levels.shape:
+        if source_levels.numel() < target_levels.numel():
             return
+        if source_levels.shape != target_levels.shape:
+            source_levels = source_levels[: target_levels.numel()].reshape_as(target_levels)
 
         target_levels.copy_(source_levels)
         if getattr(terrain, "terrain_origins", None) is None:
