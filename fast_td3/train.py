@@ -1,14 +1,7 @@
 import os
-import sys
 
 os.environ["TORCHDYNAMO_INLINE_INBUILT_NN_MODULES"] = "1"
 os.environ["OMP_NUM_THREADS"] = "1"
-if sys.platform != "darwin":
-    os.environ["MUJOCO_GL"] = "egl"
-else:
-    os.environ["MUJOCO_GL"] = "glfw"
-os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
-os.environ["JAX_DEFAULT_MATMUL_PRECISION"] = "highest"
 
 import random
 import time
@@ -17,12 +10,6 @@ import math
 import tqdm
 import wandb
 import numpy as np
-
-try:
-    # Required for avoiding IsaacGym import error
-    import isaacgym
-except ImportError:
-    pass
 
 import torch
 import torch.nn as nn
@@ -36,7 +23,6 @@ from fast_td3_utils import (
     EmpiricalNormalization,
     IdentityNormalizer,
     RewardNormalizer,
-    PerTaskRewardNormalizer,
     SimpleReplayBuffer,
     save_params,
     mark_step,
@@ -44,11 +30,6 @@ from fast_td3_utils import (
 from hyperparams import get_args
 
 torch.set_float32_matmul_precision("high")
-
-try:
-    import jax.numpy as jnp
-except ImportError:
-    pass
 
 
 def main():
@@ -66,11 +47,9 @@ def main():
             filename = f"{checkpoint_prefix}_{step}.pt"
         return os.path.join(args.save_dir, filename)
 
-    def export_unitree_params(envs, env_type: str) -> None:
+    def export_unitree_params(envs) -> None:
         if not args.export_unitree_params:
             return
-        if env_type != "isaaclab":
-            raise ValueError("--export_unitree_params is only supported for IsaacLab environments")
 
         import inspect
         import shutil
@@ -123,53 +102,27 @@ def main():
             raise ValueError("No GPU available")
     print(f"Using device: {device}")
 
-    if args.env_name.startswith("h1hand-") or args.env_name.startswith("h1-"):
-        from environments.humanoid_bench_env import HumanoidBenchEnv
-
-        env_type = "humanoid_bench"
-        envs = HumanoidBenchEnv(args.env_name, args.num_envs, device=device)
-        eval_envs = envs
-        render_env = HumanoidBenchEnv(
-            args.env_name, 1, render_mode="rgb_array", device=device
-        )
-    elif args.env_name.startswith("Isaac-"):
-        from environments.isaaclab_env import IsaacLabEnv
-
-        env_type = "isaaclab"
-        envs = IsaacLabEnv(
-            args.env_name,
-            device.type,
-            args.num_envs,
-            args.seed,
-            action_bounds=args.action_bounds,
-        )
-        eval_envs = envs
-        render_env = envs
-    elif args.env_name.startswith("MTBench-"):
-        from environments.mtbench_env import MTBenchEnv
-
-        env_name = "-".join(args.env_name.split("-")[1:])
-        env_type = "mtbench"
-        envs = MTBenchEnv(env_name, args.device_rank, args.num_envs, args.seed)
-        eval_envs = envs
-        render_env = envs
-    else:
-        from environments.mujoco_playground_env import make_env
-
-        # TODO: Check if re-using same envs for eval could reduce memory usage
-        env_type = "mujoco_playground"
-        envs, eval_envs, render_env = make_env(
-            args.env_name,
-            args.seed,
-            args.num_envs,
-            args.num_eval_envs,
-            args.device_rank,
-            use_tuned_reward=args.use_tuned_reward,
-            use_domain_randomization=args.use_domain_randomization,
-            use_push_randomization=args.use_push_randomization,
+    if not args.env_name.startswith("Isaac-"):
+        raise ValueError(
+            "fast_td3/train.py only supports IsaacLab/Unitree environments; "
+            f"got env_name={args.env_name!r}"
         )
 
-    export_unitree_params(envs, env_type)
+    from environments.isaaclab_env import IsaacLabEnv
+
+    envs = IsaacLabEnv(
+        args.env_name,
+        str(device),
+        args.num_envs,
+        args.seed,
+        action_bounds=args.action_bounds,
+    )
+    eval_envs = envs
+
+    if args.render_interval > 0:
+        raise NotImplementedError("Rendering is not supported for IsaacLab environments")
+
+    export_unitree_params(envs)
 
     n_act = envs.num_actions
     n_obs = envs.num_obs if type(envs.num_obs) == int else envs.num_obs[0]
@@ -193,19 +146,11 @@ def main():
         critic_obs_normalizer = IdentityNormalizer()
 
     if args.reward_normalization:
-        if env_type in ["mtbench"]:
-            reward_normalizer = PerTaskRewardNormalizer(
-                num_tasks=envs.num_tasks,
-                gamma=args.gamma,
-                device=device,
-                g_max=min(abs(args.v_min), abs(args.v_max)),
-            )
-        else:
-            reward_normalizer = RewardNormalizer(
-                gamma=args.gamma,
-                device=device,
-                g_max=min(abs(args.v_min), abs(args.v_max)),
-            )
+        reward_normalizer = RewardNormalizer(
+            gamma=args.gamma,
+            device=device,
+            g_max=min(abs(args.v_min), abs(args.v_max)),
+        )
     else:
         reward_normalizer = nn.Identity()
 
@@ -229,25 +174,11 @@ def main():
         "device": device,
     }
 
-    if env_type == "mtbench":
-        actor_kwargs["n_obs"] = n_obs - envs.num_tasks + args.task_embedding_dim
-        critic_kwargs["n_obs"] = n_critic_obs - envs.num_tasks + args.task_embedding_dim
-        actor_kwargs["num_tasks"] = envs.num_tasks
-        actor_kwargs["task_embedding_dim"] = args.task_embedding_dim
-        critic_kwargs["num_tasks"] = envs.num_tasks
-        critic_kwargs["task_embedding_dim"] = args.task_embedding_dim
-
     if args.agent == "fasttd3":
-        if env_type in ["mtbench"]:
-            from fast_td3 import MultiTaskActor, MultiTaskCritic
+        from fast_td3 import Actor, Critic
 
-            actor_cls = MultiTaskActor
-            critic_cls = MultiTaskCritic
-        else:
-            from fast_td3 import Actor, Critic
-
-            actor_cls = Actor
-            critic_cls = Critic
+        actor_cls = Actor
+        critic_cls = Critic
 
         actor_kwargs.update(
             {
@@ -269,16 +200,10 @@ def main():
         if args.sim_type:
             raise ValueError("SimNorm options are only supported with agent='fasttd3'")
 
-        if env_type in ["mtbench"]:
-            from fast_td3_simbav2 import MultiTaskActor, MultiTaskCritic
+        from fast_td3_simbav2 import Actor, Critic
 
-            actor_cls = MultiTaskActor
-            critic_cls = MultiTaskCritic
-        else:
-            from fast_td3_simbav2 import Actor, Critic
-
-            actor_cls = Actor
-            critic_cls = Critic
+        actor_cls = Actor
+        critic_cls = Critic
 
         print("Using FastTD3 + SimbaV2")
         actor_kwargs.pop("init_scale")
@@ -309,16 +234,12 @@ def main():
 
     actor = actor_cls(**actor_kwargs)
 
-    if env_type in ["mtbench"]:
-        # Python 3.8 doesn't support 'from_module' in tensordict
-        policy = actor.explore
-    else:
-        from tensordict import from_module
+    from tensordict import from_module
 
-        actor_detach = actor_cls(**actor_kwargs)
-        # Copy params to actor_detach without grad
-        from_module(actor).data.to_module(actor_detach)
-        policy = actor_detach.explore
+    actor_detach = actor_cls(**actor_kwargs)
+    # Copy params to actor_detach without grad
+    from_module(actor).data.to_module(actor_detach)
+    policy = actor_detach.explore
 
     qnet = critic_cls(**critic_kwargs)
     qnet_target = critic_cls(**critic_kwargs)
@@ -354,7 +275,6 @@ def main():
         n_act=n_act,
         n_critic_obs=n_critic_obs,
         asymmetric_obs=envs.asymmetric_obs,
-        playground_mode=env_type == "mujoco_playground",
         n_steps=args.num_steps,
         gamma=args.gamma,
         device=device,
@@ -364,15 +284,12 @@ def main():
     noise_clip = args.noise_clip
 
     def evaluate():
-        num_eval_envs = eval_envs.num_envs
-        episode_returns = torch.zeros(num_eval_envs, device=device)
-        episode_lengths = torch.zeros(num_eval_envs, device=device)
-        done_masks = torch.zeros(num_eval_envs, dtype=torch.bool, device=device)
+        num_envs = eval_envs.num_envs
+        episode_returns = torch.zeros(num_envs, device=device)
+        episode_lengths = torch.zeros(num_envs, device=device)
+        done_masks = torch.zeros(num_envs, dtype=torch.bool, device=device)
 
-        if env_type == "isaaclab":
-            obs = eval_envs.reset(random_start_init=False)
-        else:
-            obs = eval_envs.reset()
+        obs = eval_envs.reset(random_start_init=False)
 
         # Run for a fixed number of steps
         for i in range(eval_envs.max_episode_steps):
@@ -384,60 +301,18 @@ def main():
 
             next_obs, rewards, dones, infos = eval_envs.step(actions.float())
 
-            if env_type == "mtbench":
-                # We only report success rate in MTBench evaluation
-                rewards = (
-                    infos["episode"]["success"].float() if "episode" in infos else 0.0
-                )
             episode_returns = torch.where(
                 ~done_masks, episode_returns + rewards, episode_returns
             )
             episode_lengths = torch.where(
                 ~done_masks, episode_lengths + 1, episode_lengths
             )
-            if env_type == "mtbench" and "episode" in infos:
-                dones = dones | infos["episode"]["success"]
             done_masks = torch.logical_or(done_masks, dones)
             if done_masks.all():
                 break
             obs = next_obs
 
         return episode_returns.mean().item(), episode_lengths.mean().item()
-
-    def render_with_rollout():
-        # Quick rollout for rendering
-        if env_type == "humanoid_bench":
-            obs = render_env.reset()
-            renders = [render_env.render()]
-        elif env_type in ["isaaclab", "mtbench"]:
-            raise NotImplementedError(
-                "We don't support rendering for IsaacLab and MTBench environments"
-            )
-        else:
-            obs = render_env.reset()
-            render_env.state.info["command"] = jnp.array([[1.0, 0.0, 0.0]])
-            renders = [render_env.state]
-        for i in range(render_env.max_episode_steps):
-            with torch.no_grad(), autocast(
-                device_type=amp_device_type, dtype=amp_dtype, enabled=amp_enabled
-            ):
-                obs = normalize_obs(obs, update=False)
-                actions = actor(obs)
-            next_obs, _, done, _ = render_env.step(actions.float())
-            if env_type == "mujoco_playground":
-                render_env.state.info["command"] = jnp.array([[1.0, 0.0, 0.0]])
-            if i % 2 == 0:
-                if env_type == "humanoid_bench":
-                    renders.append(render_env.render())
-                else:
-                    renders.append(render_env.state)
-            if done.any():
-                break
-            obs = next_obs
-
-        if env_type == "mujoco_playground":
-            renders = render_env.render_trajectory(renders)
-        return renders
 
     def update_main(data, logs_dict):
         with autocast(
@@ -633,12 +508,7 @@ def main():
         truncations = infos["time_outs"]
 
         if args.reward_normalization:
-            if env_type == "mtbench":
-                task_ids_one_hot = obs[..., -envs.num_tasks :]
-                task_indices = torch.argmax(task_ids_one_hot, dim=1)
-                update_stats(rewards, dones.float(), task_ids=task_indices)
-            else:
-                update_stats(rewards, dones.float())
+            update_stats(rewards, dones.float())
 
         if envs.asymmetric_obs:
             next_critic_obs = infos["observations"]["critic"]
@@ -693,15 +563,7 @@ def main():
                         data["next"]["critic_observations"]
                     )
                 raw_rewards = data["next"]["rewards"]
-                if env_type in ["mtbench"] and args.reward_normalization:
-                    # Multi-task reward normalization
-                    task_ids_one_hot = data["observations"][..., -envs.num_tasks :]
-                    task_indices = torch.argmax(task_ids_one_hot, dim=1)
-                    data["next"]["rewards"] = normalize_reward(
-                        raw_rewards, task_ids=task_indices
-                    )
-                else:
-                    data["next"]["rewards"] = normalize_reward(raw_rewards)
+                data["next"]["rewards"] = normalize_reward(raw_rewards)
 
                 logs_dict = update_main(data, logs_dict)
                 if args.num_updates > 1:
@@ -731,25 +593,17 @@ def main():
                     if args.eval_interval > 0 and global_step % args.eval_interval == 0:
                         print(f"Evaluating at global step {global_step}")
                         eval_avg_return, eval_avg_length = evaluate()
-                        if env_type in ["humanoid_bench", "isaaclab", "mtbench"]:
-                            # NOTE: Hacky way of evaluating performance, but just works
+                        # Evaluation reuses the training env, so restart training
+                        # rollouts with fresh policy and critic observations.
+                        if envs.asymmetric_obs:
+                            obs, critic_obs = envs.reset_with_critic_obs()
+                            critic_obs = torch.as_tensor(
+                                critic_obs, device=device, dtype=torch.float
+                            )
+                        else:
                             obs = envs.reset()
                         logs["eval_avg_return"] = eval_avg_return
                         logs["eval_avg_length"] = eval_avg_length
-
-                    if (
-                        args.render_interval > 0
-                        and global_step % args.render_interval == 0
-                    ):
-                        renders = render_with_rollout()
-                        render_video = wandb.Video(
-                            np.array(renders).transpose(
-                                0, 3, 1, 2
-                            ),  # Convert to (T, C, H, W) format
-                            fps=30,
-                            format="gif",
-                        )
-                        logs["render_video"] = render_video
                 if args.use_wandb:
                     wandb.log(
                         {

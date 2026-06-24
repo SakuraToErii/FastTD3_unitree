@@ -16,7 +16,7 @@ def _register_unitree_alias_if_needed(task_name: str) -> str:
 
 
 class IsaacLabEnv:
-    """Wrapper for IsaacLab environments to be compatible with MuJoCo Playground"""
+    """Wrapper for IsaacLab Unitree environments used by FastTD3."""
 
     def __init__(
         self,

@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$REPO_ROOT"
+
 UNITREE_RL_LAB_PATH="${UNITREE_RL_LAB_PATH:-/home/ordis/projects/unitree_rl_lab}"
 SEEDS="${SEEDS:-1}"
 

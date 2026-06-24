@@ -130,9 +130,11 @@ FSM:
 
 Do not copy only `policy.onnx` into another model directory unless you also bring the matching `params/deploy.yaml`. The ONNX and `deploy.yaml` must come from the same training/deployment contract.
 
-## Unitree-Only Cleanup Audit
+## Unitree-Only Scope
 
-If this repository is kept as a Unitree RL Lab-only fork, the active files are:
+This fork is intentionally limited to Unitree G1 and `unitree_rl_lab`.
+
+Active files:
 
 ```text
 scripts/train_unitree_fasttd3.py
@@ -148,29 +150,11 @@ fast_td3/unitree_fasttd3_preset.py
 fast_td3/unitree_policy.py
 ```
 
-Keep these if you still want the option:
+Optional helpers if you still use them:
 
 ```text
-fast_td3/fast_td3_simbav2.py      # needed only for --agent fasttd3_simbav2
-fast_td3/train_multigpu.py        # needed only for multi-GPU training
-setup.py                          # needed only if installing this repo as a package
+fast_td3/fast_td3_simbav2.py      # optional Simplicial Embeddings agent variant
+fast_td3/train_multigpu.py        # optional multi-GPU launcher
 ```
 
-Candidates to remove for a strict Unitree-only fork:
-
-```text
-fast_td3/environments/humanoid_bench_env.py
-fast_td3/environments/mtbench_env.py
-fast_td3/environments/mujoco_playground_env.py
-fast_td3/training_notebook.ipynb
-data/
-requirements/requirements_isaacgym.txt
-requirements/requirements_playground.txt
-sim2real.md
-train.sh                          # root-level old MuJoCo Playground launcher
-wandb/
-models/                           # local checkpoints/artifacts, not source
-__pycache__/ directories
-```
-
-If the non-Unitree environment wrappers are deleted, `fast_td3/train.py`, `fast_td3/train_multigpu.py`, and `fast_td3/hyperparams.py` should also be simplified to remove HumanoidBench, MuJoCo Playground, and MTBench branches. Otherwise those code paths will fail if accidentally selected.
+Other benchmark and deployment stacks are outside this fork.
