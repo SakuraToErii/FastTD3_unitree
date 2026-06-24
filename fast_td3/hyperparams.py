@@ -26,13 +26,13 @@ class BaseArgs:
     """whether to use wandb"""
     log_tensorboard: bool = True
     """whether to write TensorBoard logs into save_dir"""
-    log_interval: int = 100
+    log_interval: int = 500
     """the interval to write training logs"""
     checkpoint_path: str = None
     """the path to the checkpoint file"""
-    num_envs: int = 256
+    num_envs: int = 2048
     """the number of environments to run in parallel"""
-    total_timesteps: int = 50000
+    total_timesteps: int = 100000
     """total timesteps of the experiments"""
     critic_learning_rate: float = 3e-4
     """the learning rate of the critic"""
@@ -42,7 +42,7 @@ class BaseArgs:
     """the learning rate of the critic at the end of training"""
     actor_learning_rate_end: float = 3e-4
     """the learning rate for the actor at the end of training"""
-    buffer_size: int = 10240
+    buffer_size: int = 1024
     """the replay memory buffer size per environment"""
     num_steps: int = 1
     """the number of steps to use for the multi-step return"""
@@ -52,11 +52,11 @@ class BaseArgs:
     """target smoothing coefficient"""
     batch_size: int = 32768
     """the batch size of sample from the replay memory"""
-    policy_noise: float = 0.001
+    policy_noise: float = 0.2
     """the scale of policy noise"""
     std_min: float = 0.001
     """the minimum scale of noise"""
-    std_max: float = 0.4
+    std_max: float = 0.3
     """the maximum scale of noise"""
     learning_starts: int = 10
     """timestep to start learning"""

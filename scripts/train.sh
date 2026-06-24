@@ -6,7 +6,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
 UNITREE_RL_LAB_PATH="${UNITREE_RL_LAB_PATH:-/home/ordis/projects/unitree_rl_lab}"
-SEEDS="${SEEDS:-1}"
+SEEDS="${SEEDS:-3407}"
 
 for seed in $SEEDS; do
   exp_name="UnitreeFastTD3_seed${seed}"
