@@ -54,6 +54,16 @@ By default, the Unitree launcher passes these FastTD3 options:
 
 So the final checkpoint is saved as `model_<global_step>.pt` rather than the old FastTD3 `models/<run>_final.pt` layout.
 
+### Action Output Mode (`use_tanh`)
+
+By default, `use_tanh=False`: the Actor outputs an unbounded MLP result (matching PPO's `act_inference`), and `action_bounds` must be `None`. No clipping is applied — the environment's `JointPositionAction` (`action * 0.25 + default`) and the physics engine's joint limits are the only safety boundaries.
+
+To use classic TD3 bounded output, pass `--use_tanh --action_bounds 1.0`. The Actor appends `nn.Tanh()` (output [-1, 1]) and `IsaacLabEnv.step` scales it to `[-action_bounds, action_bounds]`. Target policy smoothing clamps to [-1, 1].
+
+Invalid combinations raise `ValueError` at startup. See `docs/action_clamp_decision.md` for the full design rationale.
+
+Rationale: with Tanh + `scale=0.25`, the maximum joint deviation was only ±0.25 rad (14.3°), far below the G1's actual joint ranges. PPO has no Tanh and no clip, so it can reach the full joint range.
+
 Evaluation runs in a separate Isaac Sim process through `fast_td3/eval_unitree.py`. The trainer writes a temporary policy snapshot under `<run>/eval/`, including the current Unitree curriculum state, and the eval process uses `eval_num_envs=128` and `seed + eval_seed_offset` (`1000003` by default). This keeps eval reset/step/curriculum updates from touching the training environment while evaluating at the same current curriculum difficulty. The implementation record is in `docs/eval_isolation.md` and corresponds to commit `77c7efd`.
 
 ## Playing And Exporting

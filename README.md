@@ -44,6 +44,20 @@ python scripts/train_unitree_fasttd3.py \
   --seed 1
 ```
 
+### 动作输出模式
+
+默认 `use_tanh=False`：Actor 输出无界（对齐 PPO），不裁剪，由环境关节限位兜底。
+
+如需经典 TD3 有界输出：
+
+```bash
+python scripts/train_unitree_fasttd3.py   --unitree_rl_lab_path /home/ordis/projects/unitree_rl_lab   --task Unitree-G1-29dof-Velocity   --run_name fasttd3_tanh_seed1   --seed 1   --use_tanh --action_bounds 1.0
+```
+
+或通过 `train.sh`：`USE_TANH=1 ACTION_BOUNDS=1.0 bash scripts/train.sh`
+
+非法组合（`--use_tanh` 不设 `--action_bounds`，或 `--action_bounds` 不设 `--use_tanh`）会报错。
+
 训练输出默认写到：
 
 ```text
@@ -115,4 +129,5 @@ fast_td3/hyperparams.py               # Unitree FastTD3 参数
 fast_td3/environments/isaaclab_env.py # Isaac Lab 环境包装
 fast_td3/unitree_bridge.py            # unitree_rl_lab 路径和任务注册桥接
 fast_td3/unitree_policy.py            # checkpoint 加载与 policy 导出
+docs/action_clamp_decision.md         # use_tanh / action_bounds 设计文档
 ```

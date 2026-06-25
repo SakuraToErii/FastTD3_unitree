@@ -39,7 +39,6 @@
 FastTD3_unitree/
 ├── README.md                  # 面向用户的使用说明（中文）
 ├── AGENTS.md                  # 本文件
-├── sim2real.md                # 已废弃，指向 docs/
 ├── train.sh                   # 顶层 wrapper，转发到 scripts/train.sh
 ├── docs/
 │   ├── unitree_fasttd3.md     # 主流程文档（训练/播放/导出/部署）
@@ -153,4 +152,4 @@ CLI 解析支持 `--foo` 与 `--foo-bar` 两种写法，布尔参数用 `--flag`
 - 改策略结构 / 导出格式动 `fast_td3/fast_td3.py`、`fast_td3/unitree_policy.py`；改了 actor 结构要同步更新 `checkpoint_actor_dims` 的维度推断。
 - 改评估动 `fast_td3/eval_unitree.py` + `fast_td3/environments/isaaclab_env.py` 的 curriculum 助手；`train.py` 里 subprocess 调用约定是「最后一行 JSON」。
 - 涉及 `params/deploy.yaml` 的任何字段变化都要同步检查 `g1_ctrl` 侧能否消费。
-- 详细操作流程以 `docs/unitree_fasttd3.md` 为准，`sim2real.md` 已废弃。
+- 详细操作流程以 `docs/unitree_fasttd3.md` 为准。
