@@ -160,6 +160,7 @@ class IsaacLabEnv:
     def step(
         self, actions: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict]:
+        policy_actions = actions
         # action_bounds is only meaningful when use_tanh=True (Tanh bounds the
         # actor output to [-1, 1]; action_bounds then scales it to [-X, X]).
         # When use_tanh=False, action_bounds is None and actions pass through
@@ -173,6 +174,8 @@ class IsaacLabEnv:
         info_ret = dict(infos)
         info_ret["time_outs"] = truncations
         info_ret["observations"] = {"critic": critic_obs}
+        info_ret["policy_actions"] = policy_actions
+        info_ret["env_actions"] = actions
         # NOTE: There's really no way to get the raw observations from IsaacLab
         # We just use the 'reset_obs' as next_obs, unfortunately.
         # See https://github.com/isaac-sim/IsaacLab/issues/1362

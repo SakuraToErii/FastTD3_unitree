@@ -23,7 +23,8 @@ The Actor output is unbounded, identical to PPO's `MLP(obs)` mean output. The en
 ```
 Actor:     Tanh(MLP(obs)) → [-1, 1]
 IsaacLabEnv.step:   clamp(-1, 1) × action_bounds → [-action_bounds, action_bounds]
-Target smoothing:   clamp(-1, 1)
+Critic/replay:      use scaled env-facing action space
+Target smoothing:   clamp(-1, 1) × action_bounds
 action_bounds:      must be set (error if None)
 ```
 
@@ -40,7 +41,7 @@ The Actor output is bounded by Tanh. `action_bounds` scales the Tanh output to a
 
 ### Why no separate `action_low` / `action_high`
 
-When `use_tanh=True`, the target policy smoothing clamp range is always [-1, 1] (Tanh's natural range), regardless of `action_bounds`. The `action_bounds` scaling happens only in `IsaacLabEnv.step` (environment-facing), not in the critic's target computation (which operates in pre-scaling action space). So there's no need for separate variables.
+When `use_tanh=True`, the critic and replay buffer now use the same scaled action space that the environment actually executes. The target actor output is still naturally bounded by Tanh, but before critic evaluation it is mapped through `clamp(-1, 1) × action_bounds`, so target smoothing and critic inputs stay consistent with the env-facing action contract.
 
 ## Files Changed
 

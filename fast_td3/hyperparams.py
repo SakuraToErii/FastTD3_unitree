@@ -42,9 +42,9 @@ class BaseArgs:
     """the learning rate of the critic"""
     actor_learning_rate: float = 3e-4
     """the learning rate for the actor"""
-    critic_learning_rate_end: float = 3e-4
+    critic_learning_rate_end: float = 1e-4
     """the learning rate of the critic at the end of training"""
-    actor_learning_rate_end: float = 3e-4
+    actor_learning_rate_end: float = 1e-4
     """the learning rate for the actor at the end of training"""
     buffer_size: int = 1024
     """the replay memory buffer size per environment"""
@@ -62,9 +62,9 @@ class BaseArgs:
     """the minimum scale of noise"""
     std_max: float = 0.3
     """the maximum scale of noise"""
-    std_max_end: float = None
+    std_max_end: float = 0.1
     """final value of std_max after cosine annealing; None -> anneal down to std_min"""
-    learning_starts: int = 10
+    learning_starts: int = 128
     """timestep to start learning"""
     policy_frequency: int = 2
     """the frequency of training policy (delayed)"""

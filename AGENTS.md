@@ -74,7 +74,7 @@ python scripts/train_unitree_fasttd3.py \
   --run_name fasttd3_seed1 \
   --seed 1
 ```
-`scripts/train.sh` 是批量入口，默认 `SEEDS=3407`、`num_envs=512`、`buffer_size=4096`，噪声相关超参沿用 `hyperparams.py` 默认值（`policy_noise=0.1`、`noise_clip=0.2`、`std_max=0.3`、`std_max_end=None`），可通过环境变量 `SEEDS` / `UNITREE_RL_LAB_PATH` 覆盖。
+`scripts/train.sh` 是批量入口，默认 `SEEDS=3407`、`num_envs=512`、`buffer_size=4096`，噪声相关超参沿用 `hyperparams.py` 默认值（`policy_noise=0.1`、`noise_clip=0.2`、`std_max=0.3`、`std_max_end=0.1`），可通过环境变量 `SEEDS` / `UNITREE_RL_LAB_PATH` 覆盖。
 
 launcher 做的事：解析 Unitree 特有参数 → 把 venv site-packages 提前到 `sys.path`（防止 Isaac Sim 的 `pip_prebundle` 阴影覆盖依赖，并会删掉被污染的 `typing_extensions` 模块）→ 注册任务别名 → 构造 Unitree 风格的 `<timestamp>_<run_name>` 日志目录 → 通过 `runpy.run_path` 以 `__main__` 跑 `fast_td3/train.py`，并默认补上 `--save_dir`、`--checkpoint_prefix model`、`--save_final_as_step`、`--export_unitree_params`。
 
@@ -136,7 +136,7 @@ FSM:
 | `critic_hidden_dim / actor_hidden_dim` | 1024 / 512 | |
 | `gamma / tau` | 0.99 / 0.1 | |
 | `policy_noise / noise_clip` | 0.1 / 0.2 | target policy smoothing；noise_clip ≈ 2×policy_noise 使 clip 实际生效 |
-| `std_min / std_max / std_max_end` | 0.001 / 0.3 / None | 探索噪声区间；std_max_end=None 时退火到 std_min |
+| `std_min / std_max / std_max_end` | 0.001 / 0.3 / 0.1 | 探索噪声区间；`std_max_end=None` 时才退火到 `std_min` |
 | `policy_frequency / num_updates` | 2 / 4 | |
 | `eval_interval / eval_num_envs / eval_seed_offset` | 1000 / 128 / 1000003 | |
 | `use_tanh` | False | Actor 末层是否使用 Tanh；False=无界(对齐 PPO)，True=有界[-1,1] |

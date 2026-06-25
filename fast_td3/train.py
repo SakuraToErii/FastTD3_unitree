@@ -304,12 +304,22 @@ def main():
 
     actor = actor_cls(**actor_kwargs)
 
-    from tensordict import from_module
-
     actor_detach = actor_cls(**actor_kwargs)
-    # Copy params to actor_detach without grad
-    from_module(actor).data.to_module(actor_detach)
+
+    @torch.no_grad()
+    def sync_rollout_actor() -> None:
+        rollout_noise_scales = actor_detach.noise_scales.detach().clone()
+        actor_detach.load_state_dict(actor.state_dict(), strict=False)
+        actor_detach.noise_scales.copy_(rollout_noise_scales)
+        actor_detach.action_std_scales.copy_(actor.action_std_scales)
+
+    sync_rollout_actor()
     policy = actor_detach.explore
+
+    def to_critic_action_space(action_tensor: torch.Tensor) -> torch.Tensor:
+        if args.action_bounds is None:
+            return action_tensor
+        return torch.clamp(action_tensor, -1.0, 1.0) * args.action_bounds
 
     qnet = critic_cls(**critic_kwargs)
     qnet_target = critic_cls(**critic_kwargs)
@@ -466,11 +476,13 @@ def main():
         # Exploration-noise calibration metrics: expose the effective std and
         # the noise/action magnitude ratio so coverage can be monitored.
         with torch.no_grad():
-            expl_std_mean = actor.noise_scales.mean().item()
-            std_max_cur = actor.std_max.item()
+            expl_std_mean = actor_detach.noise_scales.mean().item()
+            std_max_cur = actor_detach.std_max.item()
             action_abs_mean = actions.abs().mean().item()
             noise_mag = (
-                (actor.noise_scales * actor.action_std_scales).mean().item()
+                (
+                    actor_detach.noise_scales * actor_detach.action_std_scales
+                ).mean().item()
             )
         scalars["Train/expl_std_mean"] = expl_std_mean
         scalars["Train/std_max_cur"] = std_max_cur
@@ -524,8 +536,7 @@ def main():
 
             with torch.no_grad():
                 next_state_actions = actor(next_observations) + clipped_noise
-                if args.use_tanh:
-                    next_state_actions = next_state_actions.clamp(-1.0, 1.0)
+                next_state_actions = to_critic_action_space(next_state_actions)
                 qf1_next_target_projected, qf2_next_target_projected = (
                     qnet_target.projection(
                         next_critic_observations,
@@ -590,7 +601,8 @@ def main():
                 else data["observations"]
             )
 
-            qf1, qf2 = qnet(critic_observations, actor(data["observations"]))
+            policy_actions = to_critic_action_space(actor(data["observations"]))
+            qf1, qf2 = qnet(critic_observations, policy_actions)
             qf1_value = qnet.get_value(F.softmax(qf1, dim=1))
             qf2_value = qnet.get_value(F.softmax(qf2, dim=1))
             if args.use_cdq:
@@ -664,6 +676,7 @@ def main():
         global_step = torch_checkpoint["global_step"]
     else:
         global_step = 0
+    sync_rollout_actor()
 
     # Exploration-noise annealing: cosine-decay std_max from std_max to
     # std_max_end (defaults to std_min) over total_timesteps, mirroring the
@@ -719,6 +732,7 @@ def main():
 
             next_obs, rewards, dones, infos = envs.step(actions.float())
             truncations = infos["time_outs"]
+            stored_actions = infos["env_actions"]
 
             if "episode" in infos:
                 ep_infos.append(infos["episode"])
@@ -752,7 +766,9 @@ def main():
             transition = TensorDict(
                 {
                     "observations": obs,
-                    "actions": torch.as_tensor(actions, device=device, dtype=torch.float),
+                    "actions": torch.as_tensor(
+                        stored_actions, device=device, dtype=torch.float
+                    ),
                     "next": {
                         "observations": true_next_obs,
                         "rewards": torch.as_tensor(
@@ -795,9 +811,11 @@ def main():
                     if args.num_updates > 1:
                         if i % args.policy_frequency == 1:
                             logs_dict = update_pol(data, logs_dict)
+                            sync_rollout_actor()
                     else:
                         if global_step % args.policy_frequency == 0:
                             logs_dict = update_pol(data, logs_dict)
+                            sync_rollout_actor()
 
                     soft_update(qnet, qnet_target, args.tau)
 

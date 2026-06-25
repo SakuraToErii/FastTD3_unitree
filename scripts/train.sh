@@ -27,8 +27,8 @@ for seed in $SEEDS; do
     --project UnitreeFastTD3 \
     --run_name "fasttd3_seed${seed}" \
     --seed "$seed" \
-    --num_envs 512 \
-    --buffer_size 4096 \
+    --num_envs 2048 \
+    --buffer_size 1024 \
     ${USE_TANH:+--use_tanh} \
     ${ACTION_BOUNDS:+--action_bounds $ACTION_BOUNDS}
 done

@@ -22,12 +22,22 @@ FastTD3 有两类噪声：
 
 ### 2. 实现了探索噪声 `std_max` 的 cosine 退火
 
-- **`fast_td3/hyperparams.py`**：新增超参 `std_max_end: float = None`（`None` 时退火到 `std_min`）。
+- **`fast_td3/hyperparams.py`**：新增超参 `std_max_end: float = 0.1`（显式设为 `None` 时退火到 `std_min`）。
 - **`fast_td3/train.py` / `fast_td3/train_multigpu.py`**：新增 `current_std_max(step)` 与 `apply_exploration_schedule(step)`。在 `learning_starts` 之前保持满 `std_max`（warm-up 平台，保证 buffer 初期高覆盖随机探索），之后按 cosine 从 `std_max` 退火到 `std_max_end`，风格与已有 LR `CosineAnnealingLR` 一致。每步在 `policy()` 调用前更新 `actor.std_max` / `actor_detach.std_max`；resume 时按 `global_step` 重算一次。`explore()` 中 done 重采样读取 `self.std_max`，故重采样区间自动跟随退火。
+
+### 2.1 修正了 rollout actor 与训练 actor 的同步
+
+- **`fast_td3/train.py` / `fast_td3/train_multigpu.py`**：采样仍使用无梯度的 `actor_detach.explore`，但在初始化、resume，以及每次 actor 更新后都会把训练中的 actor 权重同步到 rollout actor。这样既保留 episode-level sticky noise 的状态，又保证环境交互策略随训练更新，而不是停留在初始化权重。
+- **训练日志** 里的 `Train/expl_std_mean` / `Train/std_max_cur` / `Train/noise_action_ratio` 也改为读取实际 rollout actor 的噪声状态，避免监控对象与采样对象不一致。
 
 ### 3. 实现了 target policy smoothing 的 per-dim clip
 
 - **`fast_td3/train.py` / `fast_td3/train_multigpu.py`**：target policy noise 由全局 `clamp(-noise_clip, noise_clip)` 改为 `clamp × action_std_scales`，使平滑邻域跟随各关节控制权限。`use_tanh=True` 分支保留原 `clamp(-1,1)`；`use_tanh=False` 下不再无约束放行，而是依靠 per-dim clip 约束平滑范围。
+
+### 3.1 修正了 replay 中动作的语义
+
+- **`fast_td3/environments/isaaclab_env.py`**：`step()` 现在同时回传策略原始输出 `policy_actions` 与环境实际执行的 `env_actions`。
+- **`fast_td3/train.py` / `fast_td3/train_multigpu.py`**：写入 replay buffer 的动作改为 `env_actions`。这样在 `use_tanh=True` 时，critic 学到的是 clamp/scale 后真正作用于环境的动作，而不是缩放前的 actor 输出；默认 `use_tanh=False` 时两者相同。
 
 ### 4. 统一了 `policy_noise` / `noise_clip` 取值与文档
 
