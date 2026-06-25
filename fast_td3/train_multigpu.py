@@ -532,12 +532,12 @@ def main(rank: int, world_size: int):
                 -noise_clip, noise_clip
             )
 
-            next_state_actions = actor(next_observations) + clipped_noise
-            if args.use_tanh:
-                next_state_actions = next_state_actions.clamp(-1.0, 1.0)
             discount = args.gamma ** data["next"]["effective_n_steps"]
 
             with torch.no_grad():
+                next_state_actions = actor(next_observations) + clipped_noise
+                if args.use_tanh:
+                    next_state_actions = next_state_actions.clamp(-1.0, 1.0)
                 qf1_next_target_projected, qf2_next_target_projected = (
                     qnet_target.projection(
                         next_critic_observations,
