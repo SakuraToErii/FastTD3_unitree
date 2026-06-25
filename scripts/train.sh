@@ -18,5 +18,9 @@ for seed in $SEEDS; do
     --exp_name "$exp_name" \
     --project UnitreeFastTD3 \
     --run_name "fasttd3_seed${seed}" \
-    --seed "$seed"
+    --seed "$seed" \
+    --num_envs 512 \
+    --buffer_size 4096 \
+    --policy_noise 0.1 \
+    --std_max 0.3 
 done
