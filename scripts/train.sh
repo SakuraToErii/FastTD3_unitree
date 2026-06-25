@@ -29,8 +29,6 @@ for seed in $SEEDS; do
     --seed "$seed" \
     --num_envs 512 \
     --buffer_size 4096 \
-    --policy_noise 0.1 \
-    --std_max 0.3 \
     ${USE_TANH:+--use_tanh} \
     ${ACTION_BOUNDS:+--action_bounds $ACTION_BOUNDS}
 done

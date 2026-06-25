@@ -231,6 +231,7 @@ def main():
         "hidden_dim": args.actor_hidden_dim,
         "std_min": args.std_min,
         "std_max": args.std_max,
+        "action_std_scales": getattr(envs, "action_std_scales", None),
     }
     critic_kwargs = {
         "n_obs": n_critic_obs,
@@ -461,8 +462,20 @@ def main():
         if "eval_avg_return" in logs:
             scalars["Eval/avg_return"] = scalar_value(logs["eval_avg_return"])
             scalars["Eval/avg_length"] = scalar_value(logs["eval_avg_length"])
-        scalars.update(envs.curriculum_scalars())
         scalars.update(collect_episode_info_scalars(ep_infos))
+        # Exploration-noise calibration metrics: expose the effective std and
+        # the noise/action magnitude ratio so coverage can be monitored.
+        with torch.no_grad():
+            expl_std_mean = actor.noise_scales.mean().item()
+            std_max_cur = actor.std_max.item()
+            action_abs_mean = actions.abs().mean().item()
+            noise_mag = (
+                (actor.noise_scales * actor.action_std_scales).mean().item()
+            )
+        scalars["Train/expl_std_mean"] = expl_std_mean
+        scalars["Train/std_max_cur"] = std_max_cur
+        scalars["Train/action_abs_mean"] = action_abs_mean
+        scalars["Train/noise_action_ratio"] = noise_mag / (action_abs_mean + 1e-6)
         return scalars
 
     def write_scalar_logs(scalars, step):
@@ -496,9 +509,15 @@ def main():
             else:
                 bootstrap = (truncations | ~dones).float()
 
+            # Target policy smoothing: per-dimension clip scaled by each
+            # joint's action_std_scales so the smoothing neighbourhood follows
+            # the joint's control authority (no global [-1,1] clamp, which is
+            # meaningless for the unbounded use_tanh=False actor).
+            target_scales = actor.action_std_scales
             clipped_noise = torch.randn_like(actions)
-            clipped_noise = clipped_noise.mul(policy_noise).clamp(
-                -noise_clip, noise_clip
+            clipped_noise = (
+                clipped_noise.mul(policy_noise).clamp(-noise_clip, noise_clip)
+                * target_scales
             )
 
             discount = args.gamma ** data["next"]["effective_n_steps"]
@@ -646,6 +665,30 @@ def main():
     else:
         global_step = 0
 
+    # Exploration-noise annealing: cosine-decay std_max from std_max to
+    # std_max_end (defaults to std_min) over total_timesteps, mirroring the
+    # LR cosine scheduler. Before learning_starts the full std_max is kept
+    # so the buffer is seeded with high-coverage random exploration.
+    std_max_end = args.std_max_end if args.std_max_end is not None else args.std_min
+
+    def current_std_max(step: int) -> float:
+        if step < args.learning_starts:
+            return args.std_max
+        progress = (step - args.learning_starts) / max(
+            1, args.total_timesteps - args.learning_starts
+        )
+        progress = min(max(progress, 0.0), 1.0)
+        return std_max_end + (args.std_max - std_max_end) * 0.5 * (
+            1.0 + math.cos(math.pi * progress)
+        )
+
+    def apply_exploration_schedule(step: int) -> None:
+        cur = current_std_max(step)
+        actor.std_max.fill_(cur)
+        actor_detach.std_max.fill_(cur)
+
+    apply_exploration_schedule(global_step)
+
     dones = None
     pbar = tqdm.tqdm(total=args.total_timesteps, initial=global_step)
     ep_infos = []
@@ -659,6 +702,7 @@ def main():
     try:
         while global_step < args.total_timesteps:
             mark_step()
+            apply_exploration_schedule(global_step)
             logs_dict = TensorDict()
             if (
                 start_time is None

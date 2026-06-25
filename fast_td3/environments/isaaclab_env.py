@@ -78,6 +78,40 @@ class IsaacLabEnv:
         else:
             self.num_privileged_obs = 0
         self.num_actions = self.envs.unwrapped.single_action_space.shape[0]
+        self.action_std_scales = self._compute_action_std_scales()
+
+    def _compute_action_std_scales(self) -> torch.Tensor:
+        """Per-dimension action-noise scaling based on each joint's effective
+        control authority.
+
+        Uses ``0.25 * effort_limit / stiffness`` (the action magnitude that
+        saturates the actuator torque, matching Unitree's mimic action scale)
+        as a physically-grounded per-joint unit, then normalizes to ``[0, 1]``
+        so the largest-range joint keeps the configured ``std_max``. Falls back
+        to a uniform vector of ones when the articulation limits cannot be
+        read (e.g. non-Implicit actuators), preserving legacy behaviour.
+        """
+        n_act = self.num_actions
+        try:
+            robot = self.envs.unwrapped.scene["robot"]
+            view = robot.root_physx_view
+            effort = view.get_dof_max_forces().squeeze(0)        # (n_act,)
+            stiffness = view.get_dof_stiffness().squeeze(0)     # (n_act,)
+            effort = effort.to(torch.float32).clamp_min(1e-6)
+            stiffness = stiffness.to(torch.float32).clamp_min(1e-6)
+            # JointPositionAction scale is 0.25; torque = stiffness * (action*0.25)
+            scales = 0.25 * effort / stiffness
+            mx = scales.max().clamp_min(1e-6)
+            scales = (scales / mx).to(self.envs.unwrapped.device)
+            if scales.shape[0] != n_act:
+                raise RuntimeError("DOF count mismatch")
+            return scales
+        except Exception as exc:  # noqa: BLE001 - graceful fallback
+            print(
+                f"[IsaacLabEnv] could not derive per-joint action_std_scales "
+                f"({exc!r}); falling back to uniform scaling."
+            )
+            return torch.ones(n_act, device=self.envs.unwrapped.device)
 
     def snapshot_curriculum(self) -> dict:
         snapshot = {}
@@ -193,40 +227,6 @@ class IsaacLabEnv:
                     if isinstance(value, list):
                         value = tuple(value)
                     setattr(ranges, key, value)
-
-    def curriculum_scalars(self) -> dict[str, float]:
-        scalars = {}
-        env = self.envs.unwrapped
-        try:
-            command_term = env.command_manager.get_term("base_velocity")
-        except (AttributeError, KeyError):
-            command_term = None
-        if command_term is not None:
-            ranges = command_term.cfg.ranges
-            for name in ("lin_vel_x", "lin_vel_y", "ang_vel_z"):
-                value = getattr(ranges, name, None)
-                if value is None:
-                    continue
-                scalars[f"Curriculum/base_velocity/{name}_min"] = float(value[0])
-                scalars[f"Curriculum/base_velocity/{name}_max"] = float(value[1])
-
-        terrain = getattr(env.scene, "terrain", None)
-        if terrain is not None and hasattr(terrain, "terrain_levels"):
-            levels = terrain.terrain_levels.float()
-            scalars["Curriculum/terrain/level_mean"] = levels.mean().item()
-            scalars["Curriculum/terrain/level_max"] = levels.max().item()
-
-        try:
-            episode_sums = env.reward_manager._episode_sums
-            reward_term = env.reward_manager.get_term_cfg("track_lin_vel_xy")
-        except (AttributeError, KeyError):
-            return scalars
-        reward = episode_sums["track_lin_vel_xy"].mean() / env.max_episode_length_s
-        scalars["Curriculum/base_velocity/track_lin_vel_xy_mean"] = reward.item()
-        scalars["Curriculum/base_velocity/track_lin_vel_xy_threshold"] = float(
-            reward_term.weight * 0.8
-        )
-        return scalars
 
     def _snapshot_terrain_levels(self) -> dict:
         terrain = getattr(self.envs.unwrapped.scene, "terrain", None)

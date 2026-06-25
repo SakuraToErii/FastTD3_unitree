@@ -56,18 +56,21 @@ class BaseArgs:
     """target smoothing coefficient"""
     batch_size: int = 32768
     """the batch size of sample from the replay memory"""
-    policy_noise: float = 0.2
+    policy_noise: float = 0.1
     """the scale of policy noise"""
     std_min: float = 0.001
     """the minimum scale of noise"""
     std_max: float = 0.3
     """the maximum scale of noise"""
+    std_max_end: float = None
+    """final value of std_max after cosine annealing; None -> anneal down to std_min"""
     learning_starts: int = 10
     """timestep to start learning"""
     policy_frequency: int = 2
     """the frequency of training policy (delayed)"""
-    noise_clip: float = 0.5
-    """noise clip parameter of the Target Policy Smoothing Regularization"""
+    noise_clip: float = 0.2
+    """noise clip parameter of the Target Policy Smoothing Regularization.
+    Set to ~2x policy_noise so the clip triggers on a meaningful fraction of samples."""
     num_updates: int = 4
     """the number of updates to perform per step"""
     init_scale: float = 0.01
