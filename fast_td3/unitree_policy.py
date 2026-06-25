@@ -10,6 +10,14 @@ from .fast_td3_simbav2 import Actor as ActorSimbaV2
 
 
 class Policy(nn.Module):
+    """Inference wrapper: actor + obs normalizer.
+
+    ``use_tanh`` is read from the checkpoint's ``args`` dict so that the
+    exported ONNX/TorchScript policy matches the training-time actor:
+    - ``use_tanh=True``  → ``Tanh(MLP(normalizer(obs)))``, bounded [-1, 1]
+    - ``use_tanh=False`` → ``MLP(normalizer(obs))``, unbounded (PPO-style)
+    """
+
     def __init__(
         self,
         n_obs: int,
@@ -40,12 +48,14 @@ class Policy(nn.Module):
                     "sim_type": args.get("sim_type", ""),
                     "sim_dimension": args.get("sim_dimension", 64),
                     "seq_len": args.get("actor_seq_len", 8),
+                    "use_tanh": args.get("use_tanh", False),
                 }
             )
         elif agent == "fasttd3_simbav2":
             actor_cls = ActorSimbaV2
 
             actor_num_blocks = args["actor_num_blocks"]
+            actor_kwargs["use_tanh"] = args.get("use_tanh", False)
             actor_kwargs.update(
                 {
                     "scaler_init": math.sqrt(2.0 / actor_hidden_dim),

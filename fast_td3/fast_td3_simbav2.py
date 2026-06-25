@@ -149,9 +149,9 @@ class HyperLERPBlock(nn.Module):
         return x
 
 
-class HyperTanhPolicy(nn.Module):
+class HyperPolicy(nn.Module):
     """
-    A policy that outputs a Tanh action.
+    A policy that outputs an unbounded action (Tanh removed for PPO parity).
     """
 
     def __init__(
@@ -161,19 +161,22 @@ class HyperTanhPolicy(nn.Module):
         scaler_init: float,
         scaler_scale: float,
         device: torch.device = None,
+        use_tanh: bool = False,
     ):
         super().__init__()
         self.mean_w1 = HyperDense(hidden_dim, hidden_dim, device=device)
         self.mean_scaler = Scaler(hidden_dim, scaler_init, scaler_scale, device=device)
         self.mean_w2 = HyperDense(hidden_dim, action_dim, device=device)
         self.mean_bias = nn.Parameter(torch.zeros(action_dim, device=device))
+        self.use_tanh = use_tanh
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Mean path
         mean = self.mean_w1(x)
         mean = self.mean_scaler(mean)
         mean = self.mean_w2(mean) + self.mean_bias.to(mean.dtype)
-        mean = torch.tanh(mean)
+        if self.use_tanh:
+            mean = torch.tanh(mean)
         return mean
 
 
@@ -424,6 +427,7 @@ class Actor(nn.Module):
         std_min: float = 0.05,
         std_max: float = 0.8,
         device: torch.device = None,
+        use_tanh: bool = False,
     ):
         super().__init__()
         self.n_act = n_act
@@ -450,12 +454,13 @@ class Actor(nn.Module):
                 for _ in range(num_blocks)
             ]
         )
-        self.predictor = HyperTanhPolicy(
+        self.predictor = HyperPolicy(
             hidden_dim=hidden_dim,
             action_dim=n_act,
             scaler_init=1.0,
             scaler_scale=1.0,
             device=device,
+            use_tanh=use_tanh,
         )
 
         noise_scales = (

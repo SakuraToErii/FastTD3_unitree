@@ -237,6 +237,18 @@ class Critic(nn.Module):
 
 
 class Actor(nn.Module):
+    """FastTD3 Actor network.
+
+    Output activation is controlled by ``use_tanh``:
+    - ``use_tanh=False`` (default): raw MLP output, unbounded — matches PPO's
+      ``act_inference`` which returns ``self.actor(obs)`` without any activation.
+      The environment's ``JointPositionAction`` (``action * 0.25 + default``) and
+      the physics engine's joint limits serve as the only safety boundaries.
+    - ``use_tanh=True``: appends ``nn.Tanh()`` so output is bounded to [-1, 1].
+      Pair with ``action_bounds`` (see ``hyperparams.BaseArgs``) to scale the
+      bounded output to ``[-action_bounds, action_bounds]`` inside
+      ``IsaacLabEnv.step``.  Classic TD3 configuration.
+    """
     def __init__(
         self,
         n_obs: int,
@@ -248,8 +260,9 @@ class Actor(nn.Module):
         std_max: float = 0.8,
         sim_type: str = "",
         sim_dimension: int = 64,
-        seq_len: int=8,
+        seq_len: int = 8,
         device: torch.device = None,
+        use_tanh: bool = False,
     ):
         super().__init__()
         _validate_sim_config(sim_type, sim_dimension, seq_len)
@@ -271,7 +284,6 @@ class Actor(nn.Module):
             )
             self.fc_mu = nn.Sequential(
                 nn.Linear(seq_len * sim_dimension, n_act, device=device),
-                nn.Tanh(),
             )
         else:
             self.fc_head = nn.Sequential(
@@ -280,8 +292,9 @@ class Actor(nn.Module):
             )
             self.fc_mu = nn.Sequential(
                 nn.Linear(hidden_dim // 4, n_act, device=device),
-                nn.Tanh(),
             )
+        if use_tanh:
+            self.fc_mu.append(nn.Tanh())
         nn.init.normal_(self.fc_mu[0].weight, 0.0, init_scale)
         nn.init.constant_(self.fc_mu[0].bias, 0.0)
 

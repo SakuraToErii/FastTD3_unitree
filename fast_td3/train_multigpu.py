@@ -41,6 +41,9 @@ from fast_td3_utils import (
 from hyperparams import get_args
 
 torch.set_float32_matmul_precision("high")
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+torch.backends.cudnn.benchmark = False
 
 
 def setup_distributed(rank: int, world_size: int):
@@ -56,6 +59,42 @@ def setup_distributed(rank: int, world_size: int):
         )
         torch.cuda.set_device(rank)
     return is_distributed
+
+
+
+def log_git_state(save_dir: str) -> None:
+    """Record git commit/branch/status of this repo and unitree_rl_lab to log dir."""
+    import subprocess as _sp
+    from pathlib import Path as _P
+
+    repos = {
+        "FastTD3_unitree": _P(__file__).resolve().parents[1],
+    }
+    unitree_path = os.environ.get("UNITREE_RL_LAB_PATH")
+    if unitree_path:
+        repos["unitree_rl_lab"] = _P(unitree_path)
+
+    git_dir = _P(save_dir) / "params"
+    git_dir.mkdir(parents=True, exist_ok=True)
+    git_file = git_dir / "git_state.txt"
+    lines = []
+    for repo_name, repo_path in repos.items():
+        lines.append(f"===== {repo_name} ({repo_path}) =====")
+        for label, cmd in [
+            ("commit", ["git", "rev-parse", "HEAD"]),
+            ("branch", ["git", "rev-parse", "--abbrev-ref", "HEAD"]),
+            ("status", ["git", "status", "--porcelain"]),
+        ]:
+            try:
+                result = _sp.check_output(
+                    cmd, cwd=str(repo_path), text=True, stderr=_sp.DEVNULL
+                ).strip()
+                lines.append(f"{label}: {result}")
+            except Exception:
+                lines.append(f"{label}: <unavailable>")
+        lines.append("")
+    with open(git_file, "w") as f:
+        f.write("\n".join(lines))
 
 
 def main(rank: int, world_size: int):
@@ -121,6 +160,13 @@ def main(rank: int, world_size: int):
             save_code=True,
         )
 
+    neptune_run = None
+    if args.use_neptune and rank == 0:
+        import neptune
+
+        neptune_run = neptune.init_run(project=args.neptune_project, name=run_name)
+        neptune_run["config"] = vars(args)
+
     # Use different seeds per rank to avoid synchronization issues
     random.seed(args.seed + rank)
     np.random.seed(args.seed + rank)
@@ -143,6 +189,17 @@ def main(rank: int, world_size: int):
             "Only IsaacLab Unitree G1 environments are supported in this Unitree-only fork"
         )
 
+    # Validate use_tanh / action_bounds combination
+    if args.use_tanh and args.action_bounds is None:
+        raise ValueError(
+            "use_tanh=True requires action_bounds to be set (e.g., --use_tanh --action_bounds 1.0)"
+        )
+    if not args.use_tanh and args.action_bounds is not None:
+        raise ValueError(
+            "use_tanh=False does not support action_bounds; "
+            "remove --action_bounds or set --use_tanh"
+        )
+
     from environments.isaaclab_env import IsaacLabEnv
 
     isaac_device = f"cuda:{rank}" if device.type == "cuda" else device.type
@@ -155,6 +212,8 @@ def main(rank: int, world_size: int):
     )
 
     export_unitree_params(envs)
+    if rank == 0:
+        log_git_state(args.save_dir)
 
     n_act = envs.num_actions
     n_obs = envs.num_obs if type(envs.num_obs) == int else envs.num_obs[0]
@@ -166,8 +225,6 @@ def main(rank: int, world_size: int):
         )
     else:
         n_critic_obs = n_obs
-    action_low, action_high = -1.0, 1.0
-
     if args.obs_normalization:
         obs_normalizer = EmpiricalNormalization(shape=n_obs, device=device)
         critic_obs_normalizer = EmpiricalNormalization(
@@ -217,6 +274,7 @@ def main(rank: int, world_size: int):
                 "sim_type": args.sim_type,
                 "sim_dimension": args.sim_dimension,
                 "seq_len": args.actor_seq_len,
+                "use_tanh": args.use_tanh,
             }
         )
         critic_kwargs.update(
@@ -353,7 +411,7 @@ def main(rank: int, world_size: int):
             "--seed",
             str(args.seed + args.eval_seed_offset + rank),
             "--action-bounds",
-            str(args.action_bounds),
+            str(args.action_bounds) if args.action_bounds is not None else "None",
             "--amp-dtype",
             args.amp_dtype,
         ]
@@ -444,6 +502,9 @@ def main(rank: int, world_size: int):
                 writer.add_scalar(tag, value, step)
         if args.use_wandb:
             wandb.log(scalars, step=step)
+        if neptune_run is not None:
+            for tag, value in scalars.items():
+                neptune_run[tag].log(value, step=step)
 
     def update_main(data, logs_dict):
         with autocast(
@@ -471,9 +532,9 @@ def main(rank: int, world_size: int):
                 -noise_clip, noise_clip
             )
 
-            next_state_actions = (actor(next_observations) + clipped_noise).clamp(
-                action_low, action_high
-            )
+            next_state_actions = actor(next_observations) + clipped_noise
+            if args.use_tanh:
+                next_state_actions = next_state_actions.clamp(-1.0, 1.0)
             discount = args.gamma ** data["next"]["effective_n_steps"]
 
             with torch.no_grad():
@@ -820,6 +881,9 @@ def main(rank: int, world_size: int):
         if writer is not None:
             writer.flush()
             writer.close()
+
+    if neptune_run is not None:
+        neptune_run.stop()
 
     envs.close()
 

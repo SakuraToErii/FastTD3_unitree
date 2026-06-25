@@ -25,13 +25,19 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, required=True, help="Evaluation seed.")
     parser.add_argument(
         "--action-bounds",
-        type=float,
-        default=1.0,
-        help="Action clamp scale used by the training env.",
+        type=str,
+        default=None,
+        help="Action clamp scale (only when use_tanh=True); None = no clipping (use_tanh=False).",
     )
     parser.add_argument("--amp", action="store_true", help="Enable autocast during evaluation.")
     parser.add_argument("--amp-dtype", choices=("bf16", "fp16"), default="bf16", help="Autocast dtype.")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.action_bounds is not None:
+        if args.action_bounds.lower() == "none":
+            args.action_bounds = None
+        else:
+            args.action_bounds = float(args.action_bounds)
+    return args
 
 
 def main() -> None:

@@ -65,7 +65,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--video_length", type=int, default=200, help="Length of the recorded video in steps.")
     parser.add_argument("--disable_fabric", action="store_true", default=False)
     parser.add_argument("--real-time", action="store_true", default=False, help="Run in real time if possible.")
-    parser.add_argument("--action_bounds", type=float, default=None, help="Override checkpoint action bound.")
+    parser.add_argument("--action_bounds", type=float, default=None, help="Override checkpoint action bound (only meaningful when use_tanh=True).")
     parser.add_argument("--opset", type=int, default=18, help="ONNX opset version.")
     parser.add_argument("--export_only", action="store_true", help="Only export exported/policy.*; do not launch sim.")
     parser.add_argument("--skip_export", action="store_true", help="Skip exported/policy.pt and policy.onnx export.")
@@ -229,7 +229,7 @@ def _play(args: argparse.Namespace, checkpoint_path: Path, simulation_app) -> No
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     action_bounds = args.action_bounds
     if action_bounds is None:
-        action_bounds = checkpoint.get("args", {}).get("action_bounds", 1.0)
+        action_bounds = checkpoint.get("args", {}).get("action_bounds", None)
 
     device = env.unwrapped.device
     policy = load_policy(checkpoint_path).to(device).eval()

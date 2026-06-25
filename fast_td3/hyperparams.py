@@ -12,8 +12,8 @@ class BaseArgs:
     """the agent to use: currently support [fasttd3, fasttd3_simbav2]"""
     seed: int = 3407
     """seed of the experiment"""
-    torch_deterministic: bool = True
-    """if toggled, `torch.backends.cudnn.deterministic=False`"""
+    torch_deterministic: bool = False
+    """if toggled, cudnn.deterministic=True; default False to match PPO"""
     cuda: bool = True
     """if toggled, cuda will be enabled by default"""
     device_rank: int = 0
@@ -24,6 +24,10 @@ class BaseArgs:
     """the project name"""
     use_wandb: bool = True
     """whether to use wandb"""
+    use_neptune: bool = False
+    """whether to use neptune logging"""
+    neptune_project: str = "FastTD3"
+    """the neptune project name"""
     log_tensorboard: bool = True
     """whether to write TensorBoard logs into save_dir"""
     log_interval: int = 500
@@ -113,8 +117,14 @@ class BaseArgs:
     disable_bootstrap: bool = False
     """Whether to disable bootstrap in the critic learning"""
 
-    action_bounds: float = 1.0
-    """the bounds of the action space (-action_bounds, action_bounds)"""
+    use_tanh: bool = False
+    """if True, Actor output uses Tanh (bounded [-1,1]); requires action_bounds to be set.
+    If False, Actor output is unbounded (matches PPO); action_bounds must be None."""
+
+    action_bounds: float = None
+    """when use_tanh=True, scales clamped [-1,1] output to [-action_bounds, action_bounds].
+    Must be None when use_tanh=False. Must not be None when use_tanh=True."""
+
 
     weight_decay: float = 0.1
     """the weight decay of the optimizer"""

@@ -126,6 +126,10 @@ class IsaacLabEnv:
     def step(
         self, actions: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict]:
+        # action_bounds is only meaningful when use_tanh=True (Tanh bounds the
+        # actor output to [-1, 1]; action_bounds then scales it to [-X, X]).
+        # When use_tanh=False, action_bounds is None and actions pass through
+        # unclipped — matching PPO's RslRlVecEnvWrapper with clip_actions=None.
         if self.action_bounds is not None:
             actions = torch.clamp(actions, -1.0, 1.0) * self.action_bounds
         obs_dict, rew, terminations, truncations, infos = self.envs.step(actions)
