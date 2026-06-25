@@ -231,7 +231,6 @@ def main():
         "hidden_dim": args.actor_hidden_dim,
         "std_min": args.std_min,
         "std_max": args.std_max,
-        "action_std_scales": getattr(envs, "action_std_scales", None),
     }
     critic_kwargs = {
         "n_obs": n_critic_obs,
@@ -311,7 +310,6 @@ def main():
         rollout_noise_scales = actor_detach.noise_scales.detach().clone()
         actor_detach.load_state_dict(actor.state_dict(), strict=False)
         actor_detach.noise_scales.copy_(rollout_noise_scales)
-        actor_detach.action_std_scales.copy_(actor.action_std_scales)
 
     sync_rollout_actor()
     policy = actor_detach.explore
@@ -479,11 +477,7 @@ def main():
             expl_std_mean = actor_detach.noise_scales.mean().item()
             std_max_cur = actor_detach.std_max.item()
             action_abs_mean = actions.abs().mean().item()
-            noise_mag = (
-                (
-                    actor_detach.noise_scales * actor_detach.action_std_scales
-                ).mean().item()
-            )
+            noise_mag = actor_detach.noise_scales.mean().item()
         scalars["Train/expl_std_mean"] = expl_std_mean
         scalars["Train/std_max_cur"] = std_max_cur
         scalars["Train/action_abs_mean"] = action_abs_mean
@@ -521,16 +515,11 @@ def main():
             else:
                 bootstrap = (truncations | ~dones).float()
 
-            # Target policy smoothing: per-dimension clip scaled by each
-            # joint's action_std_scales so the smoothing neighbourhood follows
-            # the joint's control authority (no global [-1,1] clamp, which is
-            # meaningless for the unbounded use_tanh=False actor).
-            target_scales = actor.action_std_scales
-            clipped_noise = torch.randn_like(actions)
+            # Target policy smoothing (TD3): add clipped Gaussian noise to the
+            # target actor's action before critic evaluation.
             clipped_noise = (
-                clipped_noise.mul(policy_noise).clamp(-noise_clip, noise_clip)
-                * target_scales
-            )
+                torch.randn_like(actions) * policy_noise
+            ).clamp(-noise_clip, noise_clip)
 
             discount = args.gamma ** data["next"]["effective_n_steps"]
 

@@ -252,7 +252,6 @@ def main(rank: int, world_size: int):
         "hidden_dim": args.actor_hidden_dim,
         "std_min": args.std_min,
         "std_max": args.std_max,
-        "action_std_scales": getattr(envs, "action_std_scales", None),
     }
     critic_kwargs = {
         "n_obs": n_critic_obs,
@@ -336,7 +335,6 @@ def main(rank: int, world_size: int):
         rollout_noise_scales = actor_detach.noise_scales.detach().clone()
         actor_detach.load_state_dict(actor_src.state_dict(), strict=False)
         actor_detach.noise_scales.copy_(rollout_noise_scales)
-        actor_detach.action_std_scales.copy_(actor_src.action_std_scales)
 
     sync_rollout_actor()
     policy = actor_detach.explore
@@ -505,11 +503,7 @@ def main(rank: int, world_size: int):
             expl_std_mean = actor_detach.noise_scales.mean().item()
             std_max_cur = actor_detach.std_max.item()
             action_abs_mean = actions.abs().mean().item()
-            noise_mag = (
-                (
-                    actor_detach.noise_scales * actor_detach.action_std_scales
-                ).mean().item()
-            )
+            noise_mag = actor_detach.noise_scales.mean().item()
         scalars["Train/expl_std_mean"] = expl_std_mean
         scalars["Train/std_max_cur"] = std_max_cur
         scalars["Train/action_abs_mean"] = action_abs_mean
@@ -549,13 +543,11 @@ def main(rank: int, world_size: int):
             else:
                 bootstrap = (truncations | ~dones).float()
 
-            # Target policy smoothing: per-dim clip scaled by action_std_scales.
-            target_scales = actor.action_std_scales
-            clipped_noise = torch.randn_like(actions)
+            # Target policy smoothing (TD3): add clipped Gaussian noise to the
+            # target actor's action before critic evaluation.
             clipped_noise = (
-                clipped_noise.mul(policy_noise).clamp(-noise_clip, noise_clip)
-                * target_scales
-            )
+                torch.randn_like(actions) * policy_noise
+            ).clamp(-noise_clip, noise_clip)
 
             discount = args.gamma ** data["next"]["effective_n_steps"]
 

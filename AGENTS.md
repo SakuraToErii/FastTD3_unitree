@@ -74,7 +74,7 @@ python scripts/train_unitree_fasttd3.py \
   --run_name fasttd3_seed1 \
   --seed 1
 ```
-`scripts/train.sh` 是批量入口，默认 `SEEDS=3407`、`num_envs=512`、`buffer_size=4096`，噪声相关超参沿用 `hyperparams.py` 默认值（`policy_noise=0.1`、`noise_clip=0.2`、`std_max=0.3`、`std_max_end=0.1`），可通过环境变量 `SEEDS` / `UNITREE_RL_LAB_PATH` 覆盖。
+`scripts/train.sh` 是批量入口，默认 `SEEDS=3407`、`num_envs=2048`、`buffer_size=1024`，噪声相关超参沿用 `hyperparams.py` 默认值（`policy_noise=0.1`、`noise_clip=0.2`、`std_max=0.3`、`std_max_end=0.1`），可通过环境变量 `SEEDS` / `UNITREE_RL_LAB_PATH` 覆盖。
 
 launcher 做的事：解析 Unitree 特有参数 → 把 venv site-packages 提前到 `sys.path`（防止 Isaac Sim 的 `pip_prebundle` 阴影覆盖依赖，并会删掉被污染的 `typing_extensions` 模块）→ 注册任务别名 → 构造 Unitree 风格的 `<timestamp>_<run_name>` 日志目录 → 通过 `runpy.run_path` 以 `__main__` 跑 `fast_td3/train.py`，并默认补上 `--save_dir`、`--checkpoint_prefix model`、`--save_final_as_step`、`--export_unitree_params`。
 
@@ -116,7 +116,7 @@ FSM:
 
 ## 算法与代码要点
 
-- **FastTD3**：TD3 + 分布式 Critic（C51 风格，默认 `num_atoms=251`、`v_min=-10`、`v_max=10`）+ Clipped Double Q（`use_cdq=True`）。Actor 输出确定性动作并加 clipped Gaussian 探索噪声（`std_min`/`std_max`，episode 级 sticky 重采样，`std_max` 随 `global_step` cosine 退火到 `std_max_end`）。探索噪声与 target policy smoothing（`policy_noise`/`noise_clip`）均按 per-dim `action_std_scales`（由关节 effort/stiffness 推导、归一化到 [0,1]）缩放，使噪声幅度与各关节控制权限匹配。延迟策略更新 `policy_frequency=2`，每步 `num_updates=4` 次梯度。Actor 输出激活由 `use_tanh` 控制（默认 `False`，无界输出对齐 PPO；`True` 时附加 Tanh 并配合 `action_bounds` 缩放）。
+- **FastTD3**：TD3 + 分布式 Critic（C51 风格，默认 `num_atoms=251`、`v_min=-10`、`v_max=10`）+ Clipped Double Q（`use_cdq=True`）。Actor 输出确定性动作并加 Gaussian 探索噪声（`std_min`/`std_max`，episode 级 sticky 重采样，`std_max` 随 `global_step` cosine 退火到 `std_max_end`）。探索噪声为静态绝对尺度 `randn × noise_scales`，不依赖 per-joint 物理参数。target policy smoothing 使用 `randn × policy_noise` clamp 到 `±noise_clip`，同样是静态绝对尺度。延迟策略更新 `policy_frequency=2`，每步 `num_updates=4` 次梯度。Actor 输出激活由 `use_tanh` 控制（默认 `False`，无界输出对齐 PPO；`True` 时附加 Tanh 并配合 `action_bounds` 缩放）。
 - **SimNorm / SimbaV2**：可选。`sim_type ∈ {"", "sim_actor", "sim_critic", "sim_both"}`（Simplicial Normalization，arXiv 2204.00616）；`agent=fasttd3_simbav2` 用 `fast_td3_simbav2.py` 的 SimbaV2 actor（带可学习 Scaler、`num_blocks` 等）。
 - **性能优化**：默认 `torch.compile`（`reduce-overhead`）、AMP `bf16`、`torch.set_float32_matmul_precision("high")`、`TORCHDYNAMO_INLINE_INBUILT_NN_MODULES=1`、`OMP_NUM_THREADS=1`。
 - **IsaacLabEnv**（`fast_td3/environments/isaaclab_env.py`）：每个进程只起一个 Isaac Sim app（单例 `_SIMULATION_APP`，不允许换 device）；支持 asymmetric obs（critic obs）；`random_start_init=True` 在 reset 后随机化 `episode_length_buf` 以对齐 RSL-RL PPO 训练。提供 curriculum 的 `snapshot_curriculum` / `apply_curriculum_snapshot` / `frozen_curriculum` 三个助手，分别用于评估进程复刻当前难度、冻结 curriculum。
@@ -128,7 +128,7 @@ FSM:
 | 参数 | 默认 | 说明 |
 |---|---|---|
 | `env_name` | `Isaac-Unitree-G1-29dof-Velocity` | 必须 `Isaac-` 前缀，否则 `train.py` 报错 |
-| `num_envs` | 2048 | `scripts/train.sh` 覆盖为 512 |
+| `num_envs` | 2048 | `scripts/train.sh` 对齐为 2048 |
 | `total_timesteps` | 100000 | 注意默认训练步数较少，真训练需调大 |
 | `buffer_size` | 1024 | 每环境 replay 大小 |
 | `batch_size` | 32768 | |

@@ -428,7 +428,6 @@ class Actor(nn.Module):
         std_max: float = 0.8,
         device: torch.device = None,
         use_tanh: bool = False,
-        action_std_scales: torch.Tensor = None,
     ):
         super().__init__()
         self.n_act = n_act
@@ -471,14 +470,6 @@ class Actor(nn.Module):
 
         self.register_buffer("std_min", torch.as_tensor(std_min, device=device))
         self.register_buffer("std_max", torch.as_tensor(std_max, device=device))
-        if action_std_scales is None:
-            action_std_scales = torch.ones(n_act, device=device)
-        else:
-            action_std_scales = action_std_scales.to(device=device)
-        # Non-persistent: training-time noise scaling only. Excluded from
-        # state_dict so loading legacy checkpoints (and play/export, which run
-        # deterministic forward) never breaks on a missing/extra key.
-        self.register_buffer("action_std_scales", action_std_scales, persistent=False)
         self.n_envs = num_envs
         self.device = device
 
@@ -511,5 +502,5 @@ class Actor(nn.Module):
         if deterministic:
             return act
 
-        noise = torch.randn_like(act) * self.noise_scales * self.action_std_scales
+        noise = torch.randn_like(act) * self.noise_scales
         return act + noise

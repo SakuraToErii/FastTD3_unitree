@@ -263,7 +263,6 @@ class Actor(nn.Module):
         seq_len: int = 8,
         device: torch.device = None,
         use_tanh: bool = False,
-        action_std_scales: torch.Tensor = None,
     ):
         super().__init__()
         _validate_sim_config(sim_type, sim_dimension, seq_len)
@@ -306,14 +305,6 @@ class Actor(nn.Module):
 
         self.register_buffer("std_min", torch.as_tensor(std_min, device=device))
         self.register_buffer("std_max", torch.as_tensor(std_max, device=device))
-        if action_std_scales is None:
-            action_std_scales = torch.ones(n_act, device=device)
-        else:
-            action_std_scales = action_std_scales.to(device=device)
-        # Non-persistent: training-time noise scaling only. Excluded from
-        # state_dict so loading legacy checkpoints (and play/export, which run
-        # deterministic forward) never breaks on a missing/extra key.
-        self.register_buffer("action_std_scales", action_std_scales, persistent=False)
         self.n_envs = num_envs
         self.device = device
 
@@ -346,8 +337,5 @@ class Actor(nn.Module):
         if deterministic:
             return act
 
-        # Per-dimension scaling: noise magnitude is proportional to each
-        # joint's effective control authority (effort/stiffness), so small-range
-        # joints (e.g. wrists) get less noise than large-range joints (e.g. hips).
-        noise = torch.randn_like(act) * self.noise_scales * self.action_std_scales
+        noise = torch.randn_like(act) * self.noise_scales
         return act + noise
