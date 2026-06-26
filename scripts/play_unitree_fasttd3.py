@@ -129,7 +129,12 @@ def _resolve_checkpoint(args: argparse.Namespace) -> Path:
 def _verify_scripted_policy(policy, scripted_policy, obs_dim: int) -> float:
     import torch
 
+    from fast_td3.unitree_policy import UnitreeTorchScriptPolicy
+
     torch.manual_seed(0)
+    # Compare against the export wrapper, which bakes in action_bounds — not
+    # the raw Policy.forward (that does not apply action_bounds).
+    export_policy = UnitreeTorchScriptPolicy(policy).to("cpu").eval()
     max_abs_diff = 0.0
     test_obs = (
         torch.zeros(1, obs_dim, dtype=torch.float32),
@@ -137,7 +142,7 @@ def _verify_scripted_policy(policy, scripted_policy, obs_dim: int) -> float:
     )
     with torch.inference_mode():
         for obs in test_obs:
-            expected = policy(obs)
+            expected = export_policy(obs)
             actual = scripted_policy(obs)
             diff = torch.max(torch.abs(expected - actual)).item()
             max_abs_diff = max(max_abs_diff, diff)
@@ -162,7 +167,11 @@ def _export_policy(args: argparse.Namespace, checkpoint_path: Path) -> None:
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     _, obs_dim, _ = checkpoint_actor_dims(checkpoint)
     policy = load_policy(checkpoint_path).to("cpu").eval()
+    if args.action_bounds is not None:
+        policy.action_bounds = args.action_bounds
 
+    if policy.action_bounds is not None:
+        print(f"[INFO] Baking action_bounds={policy.action_bounds} into exported policy")
     export_dir = checkpoint_path.parent / "exported"
     if not args.no_export_jit:
         pt_path = export_policy_as_jit(policy, export_dir, filename="policy.pt")

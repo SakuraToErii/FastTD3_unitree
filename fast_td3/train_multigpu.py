@@ -37,6 +37,7 @@ from fast_td3_utils import (
     get_ddp_state_dict,
     load_ddp_state_dict,
     mark_step,
+    resolve_next_observations,
 )
 from hyperparams import get_args
 
@@ -725,7 +726,7 @@ def main(rank: int, world_size: int):
 
     def apply_exploration_schedule(step: int) -> None:
         cur = current_std_max(step)
-        actor.std_max.fill_(cur)
+        (actor.module if hasattr(actor, "module") else actor).std_max.fill_(cur)
         actor_detach.std_max.fill_(cur)
 
     apply_exploration_schedule(global_step)
@@ -779,15 +780,19 @@ def main(rank: int, world_size: int):
 
         if envs.asymmetric_obs:
             next_critic_obs = infos["observations"]["critic"]
-        # Compute 'true' next_obs and next_critic_obs for saving
-        true_next_obs = torch.where(
-            dones[:, None] > 0, infos["observations"]["raw"]["obs"], next_obs
+        # True end-of-episode next_obs for done envs, captured by
+        # FastTD3ManagerBasedRLEnv before IsaacLab resets. Falls back to the
+        # timeout-bootstrap approximation (reuse pre-step obs for timeouts) when
+        # no terminal observations are available.
+        terminal = infos["observations"].get("terminal")
+        terminal_obs = terminal["obs"] if terminal is not None else None
+        true_next_obs = resolve_next_observations(
+            obs, next_obs, truncations, dones, terminal_obs
         )
         if envs.asymmetric_obs:
-            true_next_critic_obs = torch.where(
-                dones[:, None] > 0,
-                infos["observations"]["raw"]["critic_obs"],
-                next_critic_obs,
+            terminal_critic = terminal["critic_obs"] if terminal is not None else None
+            true_next_critic_obs = resolve_next_observations(
+                critic_obs, next_critic_obs, truncations, dones, terminal_critic
             )
 
         transition = TensorDict(

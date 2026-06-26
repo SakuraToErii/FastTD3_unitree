@@ -410,6 +410,43 @@ class IdentityNormalizer(nn.Module):
         return x
 
 
+def timeout_bootstrap_observations(
+    observations: torch.Tensor,
+    next_observations: torch.Tensor,
+    truncations: torch.Tensor,
+) -> torch.Tensor:
+    """Avoid bootstrapping timeout transitions from IsaacLab's reset observations."""
+
+    mask = truncations.to(device=next_observations.device, dtype=torch.bool)
+    while mask.ndim < next_observations.ndim:
+        mask = mask.unsqueeze(-1)
+    return torch.where(mask, observations, next_observations)
+
+
+def resolve_next_observations(
+    observations: torch.Tensor,
+    next_observations: torch.Tensor,
+    truncations: torch.Tensor,
+    dones: torch.Tensor,
+    terminal_obs: torch.Tensor | None,
+) -> torch.Tensor:
+    """Build ``next_obs`` for the replay buffer.
+
+    Start from the timeout-bootstrap approximation (so timeouts reuse the pre-step
+    obs when no terminal obs are available), then overwrite the done rows with the
+    true end-of-episode observation captured by ``FastTD3ManagerBasedRLEnv``. When
+    ``terminal_obs`` is ``None`` (env did not capture terminals, or no env reset this
+    step) the approximation is returned unchanged.
+    """
+    true_next = timeout_bootstrap_observations(observations, next_observations, truncations)
+    if terminal_obs is None:
+        return true_next
+    done_mask = dones.to(device=true_next.device, dtype=torch.bool)
+    if done_mask.any():
+        true_next[done_mask] = terminal_obs.to(device=true_next.device, dtype=true_next.dtype)
+    return true_next
+
+
 class RewardNormalizer(nn.Module):
     def __init__(
         self,

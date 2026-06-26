@@ -33,6 +33,7 @@ from fast_td3_utils import (
     save_eval_snapshot,
     save_params,
     mark_step,
+    resolve_next_observations,
 )
 from hyperparams import get_args
 
@@ -741,15 +742,21 @@ def main():
 
             if envs.asymmetric_obs:
                 next_critic_obs = infos["observations"]["critic"]
-            # Compute 'true' next_obs and next_critic_obs for saving
-            true_next_obs = torch.where(
-                dones[:, None] > 0, infos["observations"]["raw"]["obs"], next_obs
+            # True end-of-episode next_obs for done envs, captured by
+            # FastTD3ManagerBasedRLEnv before IsaacLab resets. Falls back to the
+            # timeout-bootstrap approximation (reuse pre-step obs for timeouts) when
+            # no terminal observations are available.
+            terminal = infos["observations"].get("terminal")
+            terminal_obs = terminal["obs"] if terminal is not None else None
+            true_next_obs = resolve_next_observations(
+                obs, next_obs, truncations, dones, terminal_obs
             )
             if envs.asymmetric_obs:
-                true_next_critic_obs = torch.where(
-                    dones[:, None] > 0,
-                    infos["observations"]["raw"]["critic_obs"],
-                    next_critic_obs,
+                terminal_critic = (
+                    terminal["critic_obs"] if terminal is not None else None
+                )
+                true_next_critic_obs = resolve_next_observations(
+                    critic_obs, next_critic_obs, truncations, dones, terminal_critic
                 )
 
             transition = TensorDict(

@@ -78,6 +78,13 @@ class Policy(nn.Module):
         self.actor.eval()
         self.obs_normalizer.eval()
 
+        # action_bounds scales the Tanh-bounded actor output to
+        # [-action_bounds, action_bounds]. At training time this scaling is
+        # applied inside IsaacLabEnv.step; the C++ deploy side does NOT apply
+        # it (only the per-joint scale from deploy.yaml), so it must be baked
+        # into the exported policy to keep deployment consistent with training.
+        self.action_bounds = args.get("action_bounds", None)
+
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
         norm_obs = self.obs_normalizer(obs)
         actions = self.actor(norm_obs)
@@ -103,7 +110,15 @@ class FrozenEmpiricalNormalizer(nn.Module):
 
 
 class UnitreeTorchScriptPolicy(nn.Module):
-    """Unitree/RSL-RL style TorchScript policy: forward(obs) -> actions."""
+    """Unitree/RSL-RL style TorchScript policy: forward(obs) -> actions.
+
+    When the source policy has ``action_bounds`` set (i.e. ``use_tanh=True``
+    with a non-None ``action_bounds``), the exported policy bakes in the
+    ``clamp(actions, -1, 1) * action_bounds`` mapping so its output is in
+    ``[-action_bounds, action_bounds]`` — exactly the range the training
+    environment consumed. The C++ deploy side only applies the per-joint scale
+    from ``deploy.yaml`` and has no knowledge of ``action_bounds``.
+    """
 
     def __init__(self, policy: Policy):
         super().__init__()
@@ -115,8 +130,21 @@ class UnitreeTorchScriptPolicy(nn.Module):
         self.actor.eval()
         self.normalizer.eval()
 
+        action_bounds = getattr(policy, "action_bounds", None)
+        # Bool attribute (TorchScript-compatible) gates the clamp+scale branch;
+        # the scalar buffer carries the value. ONNX constant-folds the branch
+        # away when action_bounds is None.
+        self.apply_bounds = action_bounds is not None
+        self.register_buffer(
+            "action_bounds",
+            torch.tensor(float(action_bounds) if action_bounds is not None else 1.0),
+        )
+
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
-        return self.actor(self.normalizer(obs))
+        actions = self.actor(self.normalizer(obs))
+        if self.apply_bounds:
+            actions = torch.clamp(actions, -1.0, 1.0) * self.action_bounds
+        return actions
 
     @torch.jit.export
     def reset(self):

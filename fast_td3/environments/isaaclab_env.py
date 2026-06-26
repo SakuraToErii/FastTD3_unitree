@@ -142,6 +142,12 @@ class IsaacLabEnv:
         info_ret["observations"] = {"critic": critic_obs}
         info_ret["policy_actions"] = policy_actions
         info_ret["env_actions"] = actions
+        # True end-of-episode observations for done envs, captured by
+        # FastTD3ManagerBasedRLEnv before IsaacLab resets. ``None`` when the env is
+        # not the subclass (no terminal capture) or no env reset this step.
+        info_ret["observations"]["terminal"] = self._extract_terminal_observations(
+            infos, dones
+        )
         # NOTE: There's really no way to get the raw observations from IsaacLab
         # We just use the 'reset_obs' as next_obs, unfortunately.
         # See https://github.com/isaac-sim/IsaacLab/issues/1362
@@ -150,6 +156,31 @@ class IsaacLabEnv:
             "critic_obs": critic_obs,
         }
         return obs, rew, dones, info_ret
+
+    def _extract_terminal_observations(
+        self, infos: dict, dones: torch.Tensor
+    ) -> dict | None:
+        """Select done-env rows from the env's captured terminal observations.
+
+        ``FastTD3ManagerBasedRLEnv`` stores per-group full ``(num_envs, ...)`` tensors
+        in ``infos["terminal_observations"]``. Here we slice the done rows out so the
+        training loop can write the true ``s_{t+1}`` into the replay buffer for done
+        envs. Returns ``None`` when no terminal observations were captured.
+        """
+        terminal = infos.get("terminal_observations")
+        if terminal is None:
+            return None
+        policy = terminal.get("policy")
+        if policy is None:
+            return None
+        done_mask = dones.to(device=policy.device, dtype=torch.bool)
+        out = {"obs": policy[done_mask]}
+        critic = terminal.get("critic")
+        if self.asymmetric_obs and critic is not None:
+            out["critic_obs"] = critic[done_mask]
+        else:
+            out["critic_obs"] = None
+        return out
 
     def render(self):
         raise NotImplementedError(
