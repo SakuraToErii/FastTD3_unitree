@@ -7,20 +7,18 @@ true end-of-episode state ``s_{t+1}``. FastTD3 bootstraps timeout transitions, s
 the reset observation (or the pre-step observation, which is the previous approximation)
 as ``next_obs`` leaks next-episode state into the TD target.
 
-``FastTD3ManagerBasedRLEnv`` copies ``ManagerBasedRLEnv.step`` verbatim and inserts a
-single hook: right after reward/termination computation and *before* ``_reset_idx``,
-it computes the observation group with ``update_history=True`` (so the current step's
-reading is appended to the observation history, which matters for ``history_length > 0``
-e.g. the G1 velocity task), clones it, and stashes the clone in
-``self.extras["terminal_observations"]``. The observation-history circular buffers are
-snapshotted and restored around this extra compute so non-reset envs are not
-double-appended (their final ``compute(update_history=True)`` at the end of ``step``
-still appends exactly once).
+Capture is hooked at the reset boundary instead of by copying ``step``: ``_reset_idx`` is
+the single point where done envs are about to be cleared. Right before delegating to the
+real reset we compute the observation with ``update_history=True`` (so the current step's
+reading enters the history window -- needed for ``history_length > 0`` e.g. the G1 velocity
+task), clone it into ``extras["terminal_observations"]``, then undo the append for surviving
+envs via snapshot/restore so their final ``compute(update_history=True)`` at the end of
+``step`` still appends exactly once.
 
-This is intentionally a local, explicit copy of ``step`` rather than a monkey-patch so
-the control flow is obvious. The trade-off: if IsaacLab reorders the ``step`` pipeline
-upstream, this method must be re-aligned once. The body mirrors
-``ManagerBasedRLEnv.step`` from the IsaacLab checkout pinned for this repo.
+Overriding ``_reset_idx`` (rather than re-pasting ``step``) keeps this robust to IsaacLab
+reordering the ``step`` pipeline upstream; only ``_reset_idx``'s ``(env_ids)`` signature
+matters. The observation captured here is the full ``(num_envs, *)`` tensor for every
+group; the FastTD3 env wrapper selects the done-env rows.
 """
 
 from __future__ import annotations
@@ -34,80 +32,32 @@ class FastTD3ManagerBasedRLEnv(ManagerBasedRLEnv):
     """``ManagerBasedRLEnv`` that exposes true terminal observations via extras."""
 
     def step(self, action: torch.Tensor):
-        # process actions
-        self.action_manager.process_action(action.to(self.device))
+        # ``extras`` persists across steps; clear the previous capture so a step
+        # with no resets does not hand the wrapper a stale terminal tensor.
+        self.extras["terminal_observations"] = None
+        self._capture_terminal_observations = True
+        try:
+            return super().step(action)
+        finally:
+            self._capture_terminal_observations = False
 
-        self.recorder_manager.record_pre_step()
+    def _reset_idx(self, env_ids):
+        if not getattr(self, "_capture_terminal_observations", False):
+            super()._reset_idx(env_ids)
+            return
 
-        # check if we need to do rendering within the physics loop
-        # note: checked here once to avoid multiple checks within the loop
-        is_rendering = self.sim.has_gui() or self.sim.has_rtx_sensors()
-
-        # perform physics stepping
-        for _ in range(self.cfg.decimation):
-            self._sim_step_counter += 1
-            # set action into buffers
-            self.action_manager.apply_action()
-            # set actions into simulator
-            self.scene.write_data_to_sim()
-            # simulate
-            self.sim.step(render=False)
-            self.recorder_manager.record_post_physics_decimation_step()
-            # render between steps only if the GUI or an RTX sensor needs it
-            if self._sim_step_counter % self.cfg.sim.render_interval == 0 and is_rendering:
-                self.sim.render()
-            # update buffers at sim dt
-            self.scene.update(dt=self.physics_dt)
-
-        # post-step:
-        # -- update env counters (used for curriculum generation)
-        self.episode_length_buf += 1  # step in current episode (per env)
-        self.common_step_counter += 1  # total step (common for all envs)
-        # -- check terminations
-        self.reset_buf = self.termination_manager.compute()
-        self.reset_terminated = self.termination_manager.terminated
-        self.reset_time_outs = self.termination_manager.time_outs
-        # -- reward computation
-        self.reward_buf = self.reward_manager.compute(dt=self.step_dt)
-
-        if len(self.recorder_manager.active_terms) > 0:
-            # update observations for recording if needed
-            self.obs_buf = self.observation_manager.compute()
-            self.recorder_manager.record_post_step()
-
-        # -- reset envs that terminated/timed-out and log the episode information
-        reset_env_ids = self.reset_buf.nonzero(as_tuple=False).squeeze(-1)
-        if len(reset_env_ids) > 0:
-            # FastTD3: capture the true end-of-episode observation BEFORE _reset_idx
-            # clears the observation history. Done with update_history=True so the
-            # current step's reading enters the history (needed for history_length>0).
-            self.extras["terminal_observations"] = self._compute_terminal_observations()
-            # trigger recorder terms for pre-reset calls
-            self.recorder_manager.record_pre_reset(reset_env_ids)
-
-            self._reset_idx(reset_env_ids)
-
-            # if sensors are added to the scene, make sure we render to reflect changes in reset
-            if self.sim.has_rtx_sensors() and self.cfg.rerender_on_reset:
-                self.sim.render()
-
-            # trigger recorder terms for post-reset calls
-            self.recorder_manager.record_post_reset(reset_env_ids)
-        else:
-            # Clear any stale capture from a previous step (extras dict is reused).
-            self.extras["terminal_observations"] = None
-
-        # -- update command
-        self.command_manager.compute(dt=self.step_dt)
-        # -- step interval events
-        if "interval" in self.event_manager.available_modes:
-            self.event_manager.apply(mode="interval", dt=self.step_dt)
-        # -- compute observations
-        # note: done after reset to get the correct observations for reset envs
-        self.obs_buf = self.observation_manager.compute(update_history=True)
-
-        # return observations, rewards, resets and extras
-        return self.obs_buf, self.reward_buf, self.reset_terminated, self.reset_time_outs, self.extras
+        # True end-of-episode observation for envs about to be reset: compute with
+        # the current reading appended to history, clone, then undo the append so
+        # surviving envs are not double-appended by the final compute in ``step``.
+        snapshot = self._snapshot_observation_history()
+        try:
+            obs = self.observation_manager.compute(update_history=True)
+            self.extras["terminal_observations"] = {
+                group: value.clone() for group, value in obs.items()
+            }
+        finally:
+            self._restore_observation_history(snapshot)
+        super()._reset_idx(env_ids)
 
     # ------------------------------------------------------------------
     # Terminal observation capture helpers
@@ -147,18 +97,3 @@ class FastTD3ManagerBasedRLEnv(ManagerBasedRLEnv):
                     cb._buffer.copy_(buffer_clone)
             cb._pointer = pointer
             cb._num_pushes.copy_(num_pushes_clone)
-
-    def _compute_terminal_observations(self):
-        """Compute and clone the observation groups at the terminal state.
-
-        Returns a dict mapping each observation group name (e.g. ``"policy"``,
-        ``"critic"``) to a cloned ``(num_envs, *obs_dim)`` tensor for *all* envs. The
-        caller (the FastTD3 env wrapper) selects the done-env rows. Surviving envs'
-        rows are identical to the observations the final ``compute`` produces and are
-        simply discarded by the caller.
-        """
-        snapshot = self._snapshot_observation_history()
-        obs = self.observation_manager.compute(update_history=True)
-        terminal = {group_name: value.clone() for group_name, value in obs.items()}
-        self._restore_observation_history(snapshot)
-        return terminal
